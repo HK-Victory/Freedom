@@ -1,0 +1,2 @@
+# Freedom
+freedom of wealth
