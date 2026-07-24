@@ -33,6 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger daily task reminders
-        if: ${{ secrets.REMINDER_URL != '' }}
+        env:
+          REMINDER_URL: ${{ secrets.REMINDER_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          curl -fsS -X GET "${{ secrets.REMINDER_URL }}/api/cron/reminders?secret=${{ secrets.CRON_SECRET }}"
+          if [ -z "$REMINDER_URL" ]; then
+            echo "REMINDER_URL 未配置，跳过每日提醒。"
+            exit 0
+          fi
+          curl -fsS -X GET "$REMINDER_URL/api/cron/reminders?secret=$CRON_SECRET"
