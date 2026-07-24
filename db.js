@@ -19,6 +19,14 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 
+// 内联资源（打包进函数，避免 serverless 环境下找不到 WASM / seed 文件）
+// Vercel 的打包器(nft)无法静态追踪运行时路径，sql-wasm.wasm 与 data/seed.b64
+// 经常不会被打进函数包，因此把它们内联为 base64 模块随代码一起分发。
+let embeddedWasm = null;
+let embeddedSeed = null;
+try { embeddedWasm = require('./api/embedded-wasm'); } catch (e) { /* 本地未生成时回退到文件定位 */ }
+try { embeddedSeed = require('./api/embedded-seed'); } catch (e) { /* 同上 */ }
+
 const isVercel = !!process.env.VERCEL;
 const SEED_PATH = path.join(__dirname, 'data', 'seed.b64');
 const LOCAL_STORE = isVercel
@@ -166,7 +174,17 @@ async function init() {
   if (_db) return;
   if (!SQL) {
     const sqlJsPath = path.dirname(require.resolve('sql.js'));
-    SQL = await initSqlJs({ locateFile: (file) => path.join(sqlJsPath, file) });
+    try {
+      // 优先用内联 wasm，完全不依赖文件系统定位（Vercel 上最稳）
+      if (embeddedWasm) {
+        SQL = await initSqlJs({ wasmBinary: Buffer.from(embeddedWasm, 'base64') });
+      } else {
+        throw new Error('no embedded wasm');
+      }
+    } catch (e) {
+      console.error('[sql.js] 内联 wasm 加载失败，回退文件定位:', e.message);
+      SQL = await initSqlJs({ locateFile: (file) => path.join(sqlJsPath, file) });
+    }
   }
 
   let bytes = null;
@@ -179,6 +197,10 @@ async function init() {
   // 3) 仓库内置种子数据（冷启动兜底，已含 21 项任务 + 超管账号）
   if (!bytes && fs.existsSync(SEED_PATH)) {
     try { bytes = Buffer.from(fs.readFileSync(SEED_PATH, 'utf8'), 'base64'); } catch (e) { bytes = null; }
+  }
+  // 4) 内联种子（打包进函数，避免 serverless 文件系统找不到 data/seed.b64）
+  if (!bytes && embeddedSeed) {
+    try { bytes = Buffer.from(embeddedSeed, 'base64'); } catch (e) { bytes = null; }
   }
 
   _db = bytes && bytes.length ? new SQL.Database(bytes) : new SQL.Database();
