@@ -36,9 +36,13 @@ jobs:
           }
 
       - name: Deploy to Vercel (Production)
-        run: npx vercel deploy --prod --yes --debug --token="$VERCEL_TOKEN"
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_NAME: ${{ secrets.VERCEL_PROJECT_NAME }}
+        run: |
+          # Vercel 项目名必须全小写，不能依赖仓库目录名（如 Freedom 大写会 400 失败）
+          PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
+          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN"
 
   remind:
     # 每日定时：调用线上 /api/cron/reminders 发送到期提醒
