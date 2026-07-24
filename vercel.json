@@ -2,9 +2,8 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "h5-app/dist",
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/index.js" },
-    { "src": "/(.*)", "dest": "/index.html" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
   ],
   "env": {
     "NODE_VERSION": "20.x"
