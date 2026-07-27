@@ -2,10 +2,10 @@
  * db.js — 纯 JS 存储引擎（基于 sql.js / SQLite WASM）
  *
  * 为什么换掉 better-sqlite3？
- *   - better-sqlite3 是原生模块（.node），在 Vercel 免费(serverless) 环境难以打包且不可用；
- *   - Vercel serverless 文件系统只读（除 /tmp），本地 SQLite 文件无法持久化；
+ *   - better-sqlite3 是原生模块（.node），在 serverless 环境难以打包且不可用；
+ *   - serverless 文件系统只读（除 /tmp），本地 SQLite 文件无法持久化；
  *   - sql.js 是 SQLite 的纯 JS(WASM) 移植，API 与 SQL 语法 100% 兼容，
- *     且可通过 KV / 文件将整个数据库序列化持久化，完美适配 serverless。
+ *     且可通过 KV / 文件将整个数据库序列化持久化，完美适配 EdgeOne/Vercel serverless。
  *
  * 对外暴露的接口与旧 db.js 完全一致：
  *   - db.prepare(sql).all/get/run/exec  兼容 better-sqlite3 用法（支持 @命名参数 与 ? 位置参数）
@@ -20,16 +20,21 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 
 // 内联资源（打包进函数，避免 serverless 环境下找不到 WASM / seed 文件）
-// Vercel 的打包器(nft)无法静态追踪运行时路径，sql-wasm.wasm 与 data/seed.b64
+// 打包器(nft)无法静态追踪运行时路径，sql-wasm.wasm 与 data/seed.b64
 // 经常不会被打进函数包，因此把它们内联为 base64 模块随代码一起分发。
 let embeddedWasm = null;
 let embeddedSeed = null;
 try { embeddedWasm = require('./api/embedded-wasm'); } catch (e) { /* 本地未生成时回退到文件定位 */ }
 try { embeddedSeed = require('./api/embedded-seed'); } catch (e) { /* 同上 */ }
 
-const isVercel = !!process.env.VERCEL;
+// 通用 serverless 检测：Vercel / EdgeOne 环境变量，或 data 目录不可写（典型只读 FS）
+function isDataDirWritable() {
+  try { fs.accessSync(path.join(__dirname, 'data'), fs.constants.W_OK); return true; }
+  catch (e) { return false; }
+}
+const isServerless = !!process.env.VERCEL || !!process.env.EDGEONE_PAGES || !isDataDirWritable();
 const SEED_PATH = path.join(__dirname, 'data', 'seed.b64');
-const LOCAL_STORE = isVercel
+const LOCAL_STORE = isServerless
   ? path.join('/tmp', 'task-tracker-store')
   : path.join(__dirname, 'data', 'db.store');
 

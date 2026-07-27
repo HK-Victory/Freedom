@@ -8,6 +8,12 @@
 
 # production
 /dist
+/h5-app/dist
+/h5-app/node_modules
+
+# runtime artifacts (serverless 环境只读，本地 DB 文件不应入库)
+/data/db.store
+/data/uploads
 
 # misc
 .DS_Store
