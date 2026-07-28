@@ -37,7 +37,7 @@
 
 | Secret | 获取方式 |
 |--------|----------|
-| `EDGEONE_API_TOKEN` | https://edgeone.ai/document/177158578324279296 创建 API Token |
+| `EDGEONE_API_TOKEN` | **EdgeOne Pages 控制台「API Token / API 令牌」页签创建的令牌（个人访问令牌）** —— 注意是 Pages 专属令牌，**不是**腾讯云 CAM 的 `SecretId/SecretKey`。创建地址：https://edgeone.ai/document/177158578324279296 |
 | `EDGEONE_PROJECT_NAME` | （可选）EdgeOne 项目名称，默认 `freedom` |
 
 > 每日 09:00（北京时间）会通过 GitHub Actions 的 `schedule` 触发一次到期提醒：
