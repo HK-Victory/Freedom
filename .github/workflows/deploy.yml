@@ -1,4 +1,4 @@
-name: Deploy to EdgeOne Pages
+name: Deploy to Vercel
 
 on:
   push:
@@ -19,37 +19,34 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 20
 
-      - name: Verify EdgeOne token
+      - name: Verify Vercel token
         env:
-          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          if [ -z "$EDGEONE_API_TOKEN" ]; then
-            echo "::error::EDGEONE_API_TOKEN 未配置。请在仓库 Settings > Secrets and variables > Actions 中添加名为 EDGEONE_API_TOKEN 的密钥（值来自 https://edgeone.ai/document/177158578324279296 的 API Token）"
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN 未配置。请在仓库 Settings > Secrets and variables > Actions 中添加名为 VERCEL_TOKEN 的密钥（值来自 https://vercel.com/account/tokens）"
             exit 1
           fi
-          echo "EDGEONE_API_TOKEN 已存在，开始部署。"
+          echo "Token 已存在，校验身份..."
+          npx vercel whoami --token="$VERCEL_TOKEN" || {
+            echo "::error::VERCEL_TOKEN 校验失败，请确认 token 有效、未过期且具有部署权限"
+            exit 1
+          }
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Deploy to EdgeOne Pages (Production)
+      - name: Deploy to Vercel (Production)
         env:
-          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
-          EDGEONE_PROJECT_NAME: ${{ secrets.EDGEONE_PROJECT_NAME }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_NAME: ${{ secrets.VERCEL_PROJECT_NAME }}
         run: |
-          # EdgeOne 项目名用小写；仓库 Secrets 里可加 EDGEONE_PROJECT_NAME 覆盖
-          PROJECT_NAME="${EDGEONE_PROJECT_NAME:-freedom}"
-          # 显式部署到生产环境（production 对外公开、免预览令牌访问；不指定可能落到带门禁的 Preview）
-          npx edgeone pages deploy ./h5-app/dist -n "$PROJECT_NAME" -t "$EDGEONE_API_TOKEN" -e production
+          # Vercel 项目名必须全小写，不能依赖仓库目录名（如 Freedom 大写会 400 失败）
+          PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
+          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN"
 
   remind:
     # 每日定时：调用线上 /api/cron/reminders 发送到期提醒
-    # 需在仓库 Secrets 配置 REMINDER_URL（部署成功后的 EdgeOne 地址）
+    # 需在仓库 Secrets 配置 REMINDER_URL（部署成功后的 Vercel 地址）
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:

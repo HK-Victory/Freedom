@@ -1,12 +1,13 @@
 {
   "name": "task-tracker",
   "version": "4.0.0",
-  "description": "闻道包装设计工作室 - 任务跟踪管理系统（EdgeOne Pages Serverless 部署版）",
+  "description": "闻道包装设计工作室 - 任务跟踪管理系统（Vercel 免费 Serverless 部署版）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
     "build": "cd h5-app && npm install && npx vite build",
+    "vercel-build": "npm run build",
     "make-seed": "node scripts/make-seed.js"
   },
   "dependencies": {
@@ -17,5 +18,8 @@
     "nodemailer": "^6.9.15",
     "sql.js": "1.14.1",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "vercel": "^56.5.0"
   }
 }
