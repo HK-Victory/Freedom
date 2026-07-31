@@ -17,19 +17,21 @@
 | Install Command | `npm install` |
 | Node Version | 20.x |
 
-**环境变量（可选）：**
+**环境变量（可选，但建议配置以确保数据不丢失）：**
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `JWT_SECRET` | JWT 签发密钥 | 自动随机生成（每次冷启动变化，建议固定） |
 | `APP_URL` | 部署后的站点地址（用于邮件中的任务链接） | 空（链接回退为相对路径） |
-| `CRON_SECRET` | 保护 `/api/cron/reminders` 的密钥（Vercel Cron 调用时携带） | 空（不校验） |
-| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Vercel KV（Upstash）地址与令牌，用于跨实例持久化 | 空（仅用 /tmp 文件，单实例有效） |
+| `CRON_SECRET` | 保护 `/api/cron/reminders` 的密钥（Vercel Cron 调用时携带 `?secret=`） | 空（不校验） |
+| `BLOB_READ_WRITE_TOKEN` | **（推荐）Vercel Blob 读写令牌**，用于跨部署持久化整个数据库文件 | 空（仅用 /tmp，每次部署会重置为种子数据） |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Vercel KV（Upstash）地址与令牌，作为 Blob 不可用时的次级持久化 | 空 |
 
-> ⚠️ 数据持久化说明：Vercel Serverless 文件系统只读（除 `/tmp`），且实例间不共享。
-> 已内置 `data/seed.b64` 作为冷启动初始数据（含 21 项任务与超管账号）。
-> 若需要**真正持久化**（写入的数据在多次请求/不同实例间保留），请在 Vercel 后台创建 **KV Storage**，
-> 并把 `KV_REST_API_URL` / `KV_REST_API_TOKEN` 填入环境变量，数据库会自动序列化进 KV。
+> ⚠️ **数据持久化（重要）**：Vercel Serverless 文件系统只读（除 `/tmp`），且 `/tmp` 与实例均不跨部署保留。
+> 内置 `data/seed.b64` 仅作冷启动初始数据（含 21 项任务与超管账号）。
+> **要真正持久化（部署后数据不丢失）**，请在 Vercel 后台 **Storage → Blob** 创建存储桶，
+> 环境变量 `BLOB_READ_WRITE_TOKEN` 会自动注入；数据库文件会序列化进 Blob，每次写操作即时落盘、冷启动自动恢复。
+> 未配置 Blob/KV 时，每次重新部署都会回退到种子数据（即「部署后数据丢失」）。
 
 ## 自动化部署（GitHub Actions → Vercel）
 
@@ -105,12 +107,12 @@ task-tracker/
 |------|------|
 | express | Web 框架 |
 | sql.js | 纯 JS/WASM 版 SQLite（Vercel 友好，无原生模块） |
+| @vercel/blob | 数据库文件跨部署持久化（Blob 存储） |
 | nodemailer | 邮件发送 |
 | xlsx | Excel 文件读取 |
 | multer | Excel 文件上传处理 |
 | jsonwebtoken | JWT 认证令牌签发与验证 |
 | bcryptjs | 密码哈希加密 |
-| serverless-http | Vercel Serverless 适配 |
 
 ## 功能模块
 
@@ -137,7 +139,8 @@ task-tracker/
 - 操作日志记录
 
 ### 5. 邮件倒计时提醒
-- 提前 7 天开始每日提醒（由 Vercel Cron 每日触发 `/api/cron/reminders`）
+- **页面可配置**：「邮件配置 → 定时提醒设置」中可开关、设置**每日执行时间（北京时间）**与**提前提醒天数（如 1/3/7 天）**
+- 由 Vercel Cron 每小时触发 `/api/cron/reminders`，仅在命中页面配置的执行时间且任务剩余天数属于配置范围时才真正发送
 - SMTP 服务器配置（支持 QQ/163/Gmail/企业微信）
 - 收件人管理
 
@@ -168,11 +171,20 @@ task-tracker/
 | PUT | `/api/tasks/:id/document` | 登录 | 保存任务文档 |
 | POST | `/api/import-excel` | 超管 | 上传 Excel 重置数据 |
 | GET/PUT/POST | `/api/email/*` | 登录 | 邮件配置与收件人管理 |
+| GET/PUT | `/api/settings/reminder` | 超管 | 定时提醒设置（执行时间 / 提前天数） |
 | GET | `/api/reports/weekly` | 登录 | 周报 |
 | GET | `/api/reports/monthly` | 登录 | 月报 |
 | GET | `/api/cron/reminders` | Cron/Secret | 由 Vercel Cron 每日触发的提醒任务 |
 
 ## 变更记录
+
+### 2026-07-31 — 修复：数据持久化 + 提醒可配置
+- **#1 数据丢失修复**：`db.js` 持久化改为以 **Vercel Blob** 为主存储，每次写操作在响应返回前 `await` 落盘，冷启动自动恢复；彻底解决「每次部署后数据回退到种子」的问题（旧实现仅靠未配置的 KV + /tmp，部署即清空）
+- **#2/#3 提醒可配置**：新增「邮件配置 → 定时提醒设置」面板（仅超管），可在页面设置**每日执行时间（北京时间）**与**提前提醒天数（如 1/3/7 天）**
+- 新增 `settings` 表与 `GET/PUT /api/settings/reminder` 接口（超管）
+- `vercel.json` 增加 `crons`（每小时触发 `/api/cron/reminders`），后端按页面配置的执行时间门禁 + 提前天数过滤后才真正发送邮件
+- `scheduler.js` 发送逻辑改为仅对「剩余天数 ∈ 配置的提前天数」的任务发送
+- 需在 Vercel 后台 Storage 创建 **Blob** 并注入 `BLOB_READ_WRITE_TOKEN`（及可选 `CRON_SECRET`）
 
 ### 2026-07-23 v4.0 — Vercel 免费 Serverless 改造
 - 用 `sql.js`（纯 JS/WASM）替换 `better-sqlite3`，彻底去除原生模块依赖

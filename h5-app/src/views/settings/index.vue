@@ -98,6 +98,37 @@
           </div>
           <p class="text-muted text-sm" v-else>暂无收件人</p>
         </div>
+
+        <!-- 定时提醒设置（仅超管） -->
+        <div class="card" v-if="user?.role === 'admin'">
+          <div class="card-title">⏰ 定时提醒设置</div>
+          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的每日执行时间与提前天数（北京时间）。Vercel Cron 每小时触发一次，仅在命中配置时间且任务剩余天数匹配时发送。</p>
+          <div class="form-group">
+            <label>启用定时提醒</label>
+            <select v-model="reminder.enabled" class="form-select">
+              <option :value="1">启用</option>
+              <option :value="0">禁用</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>每日执行时间（北京时间）</label>
+            <div class="flex gap-8 align-center">
+              <input v-model.number="reminder.hour" type="number" min="0" max="23" class="form-input" style="width: 80px;" />
+              <span>时</span>
+              <span class="text-muted text-xs">（Vercel 免费版定时任务按整点触发，建议填整点）</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>提前提醒天数（任务截止前 N 天发送）</label>
+            <div class="flex gap-12 flex-wrap">
+              <label class="checkbox-label" v-for="d in leadDayOptions" :key="d">
+                <input type="checkbox" :value="d" v-model="reminder.leadDays" /> {{ d }} 天
+              </label>
+            </div>
+          </div>
+          <button class="btn btn-primary" @click="saveReminder">保存提醒设置</button>
+          <p v-if="reminderMsg" class="text-muted text-xs mt-8">{{ reminderMsg }}</p>
+        </div>
       </div>
 
       <!-- 修改密码 -->
@@ -134,6 +165,11 @@ const newRecipient = ref({ email: '', name: '' })
 const saveMsg = ref('')
 const pwdForm = ref({ old_password: '', new_password: '' })
 const pwdMsg = ref('')
+
+// 定时提醒设置
+const reminder = ref({ enabled: 0, hour: 9, leadDays: [1, 3, 7] })
+const reminderMsg = ref('')
+const leadDayOptions = [1, 2, 3, 5, 7]
 
 const loadConfig = async () => {
   try {
@@ -218,12 +254,42 @@ const logout = () => {
   router.push('/login')
 }
 
+const loadReminder = async () => {
+  try {
+    const d = await request.get('/settings/reminder')
+    reminder.value = {
+      enabled: d.enabled ? 1 : 0,
+      hour: d.hour ?? 9,
+      leadDays: Array.isArray(d.leadDays) && d.leadDays.length ? d.leadDays : [1, 3, 7]
+    }
+  } catch (err) {}
+}
+
+const saveReminder = async () => {
+  try {
+    await request.put('/settings/reminder', {
+      enabled: reminder.value.enabled ? true : false,
+      hour: Number(reminder.value.hour) || 0,
+      minute: 0,
+      leadDays: reminder.value.leadDays
+    })
+    reminderMsg.value = '提醒设置已保存'
+    setTimeout(() => reminderMsg.value = '', 3000)
+  } catch (err) {
+    reminderMsg.value = '保存失败：' + (err.error || '')
+  }
+}
+
 onMounted(() => {
   loadConfig()
   loadRecipients()
+  loadReminder()
 })
 </script>
 
 <style scoped>
 .settings-page { min-height: 100vh; }
+.align-center { align-items: center; }
+.flex-wrap { flex-wrap: wrap; }
+.checkbox-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
 </style>

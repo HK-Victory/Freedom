@@ -18,6 +18,7 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const { put, list } = require('@vercel/blob');
 
 // 内联资源（打包进函数，避免 serverless 环境下找不到 WASM / seed 文件）
 // Vercel 的打包器(nft)无法静态追踪运行时路径，sql-wasm.wasm 与 data/seed.b64
@@ -33,7 +34,13 @@ const LOCAL_STORE = isVercel
   ? path.join('/tmp', 'task-tracker-store')
   : path.join(__dirname, 'data', 'db.store');
 
-// Vercel KV（基于 Upstash，免费额度足够小团队使用）
+// Vercel Blob（推荐的主持久化方案）：把整个 sql.js 数据库文件存到 Blob，
+// 跨部署 / 重启都不会丢失。在 Vercel 后台 “Storage” 创建 Blob 后，
+// 环境变量 BLOB_READ_WRITE_TOKEN 会自动注入，也可手动填写。
+const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+const BLOB_KEY = 'freedom-db.sqlite';
+
+// Vercel KV（基于 Upstash）：作为 Blob 不可用时的次级持久化。
 // 在 Vercel 后台 “Storage” 中一键创建 KV 后，以下两个环境变量会自动注入，
 // 也可手动在环境变量里填写 KV_REST_API_URL / KV_REST_API_TOKEN。
 const KV_URL = process.env.KV_REST_API_URL;
@@ -126,9 +133,13 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 `;
 
-// -------- 持久化 --------
+// -------- 持久化（跨部署不丢失：优先 Vercel Blob，其次 KV，本地 /tmp 仅作同实例缓存）--------
 function exportBytes() {
   if (!_db) return null;
   try { return Buffer.from(_db.export()); } catch (e) { return null; }
@@ -142,7 +153,7 @@ function persistLocal() {
 function persistKV() {
   if (!_db || !KV_URL) return;
   const b64 = exportBytes().toString('base64');
-  // 最佳努力：异步、不阻塞请求；serverless 函数在响应后通常仍存活片刻完成写入
+  // 最佳努力：异步、不阻塞请求
   fetch(`${KV_URL}/set/${KV_KEY}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'text/plain' },
@@ -150,7 +161,35 @@ function persistKV() {
   }).catch(e => console.error('[KV] 保存失败:', e.message));
 }
 
+async function persistBlob() {
+  if (!_db || !BLOB_TOKEN) return false;
+  try {
+    const bytes = exportBytes();
+    if (!bytes) return false;
+    await put(BLOB_KEY, bytes, {
+      access: 'private',
+      token: BLOB_TOKEN,
+      allowOverwrite: true,
+      contentType: 'application/octet-stream'
+    });
+    return true;
+  } catch (e) {
+    console.error('[Blob] 保存失败:', e.message);
+    return false;
+  }
+}
+
+// 最佳努力的异步保存（请求处理中调用，不阻塞响应）
 function schedulePersist() {
+  persistLocal();
+  persistKV();
+  if (BLOB_TOKEN) persistBlob().catch(e => console.error('[Blob] 后台保存失败:', e.message));
+}
+
+// 同步落盘（在响应返回前 await，确保部署/重启不丢数据）
+async function flush() {
+  if (!_db) return;
+  if (BLOB_TOKEN) await persistBlob();
   persistLocal();
   persistKV();
 }
@@ -165,6 +204,20 @@ async function loadFromKV() {
     if (j && j.result != null) return Buffer.from(j.result, 'base64');
   } catch (e) {
     console.error('[KV] 读取失败:', e.message);
+  }
+  return null;
+}
+
+async function loadFromBlob() {
+  if (!BLOB_TOKEN) return null;
+  try {
+    const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+    if (!blobs || !blobs.length) return null;
+    const r = await fetch(blobs[0].downloadUrl);
+    if (!r.ok) return null;
+    return Buffer.from(await r.arrayBuffer());
+  } catch (e) {
+    console.error('[Blob] 读取失败:', e.message);
   }
   return null;
 }
@@ -188,17 +241,19 @@ async function init() {
   }
 
   let bytes = null;
-  // 1) 优先从 KV 读取（跨实例最新数据）
-  bytes = await loadFromKV();
-  // 2) 本地文件（同一实例内的可靠副本）
+  // 1) 优先从 Vercel Blob 读取（跨部署持久化的主存储）
+  bytes = await loadFromBlob();
+  // 2) 其次 K（跨实例最新数据）
+  if (!bytes) bytes = await loadFromKV();
+  // 3) 本地文件（同一实例内的可靠副本）
   if (!bytes && fs.existsSync(LOCAL_STORE)) {
     try { bytes = fs.readFileSync(LOCAL_STORE); } catch (e) { bytes = null; }
   }
-  // 3) 仓库内置种子数据（冷启动兜底，已含 21 项任务 + 超管账号）
+  // 4) 仓库内置种子数据（冷启动兜底，已含 21 项任务 + 超管账号）
   if (!bytes && fs.existsSync(SEED_PATH)) {
     try { bytes = Buffer.from(fs.readFileSync(SEED_PATH, 'utf8'), 'base64'); } catch (e) { bytes = null; }
   }
-  // 4) 内联种子（打包进函数，避免 serverless 文件系统找不到 data/seed.b64）
+  // 5) 内联种子（打包进函数，避免 serverless 文件系统找不到 data/seed.b64）
   if (!bytes && embeddedSeed) {
     try { bytes = Buffer.from(embeddedSeed, 'base64'); } catch (e) { bytes = null; }
   }
@@ -209,8 +264,8 @@ async function init() {
   // 确保超管账号存在（种子已含，这里幂等兜底）
   initDefaultAdmin();
 
-  // 首次写入本地/KV，便于后续冷启动命中
-  schedulePersist();
+  // 首次把当前库（种子或已有数据）落盘到 Blob，确保后续冷启动命中、跨部署不丢
+  await flush();
 }
 
 function ensureReady() {
@@ -366,10 +421,49 @@ function deleteUser(id) {
   return db.prepare('DELETE FROM users WHERE id = ?').run(id);
 }
 
+// -------- 提醒设置（页面可配置的定时发送时间 / 提前提醒天数）--------
+function getSetting(key, def) {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row ? row.value : def;
+  } catch (e) { return def; }
+}
+
+function setSetting(key, value) {
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+    .run(key, String(value), String(value));
+}
+
+function getReminderSettings() {
+  const enabled = getSetting('reminder_enabled', '0') === '1';
+  let hour = parseInt(getSetting('reminder_hour', '9'), 10);
+  if (isNaN(hour) || hour < 0 || hour > 23) hour = 9;
+  let minute = parseInt(getSetting('reminder_minute', '0'), 10);
+  if (isNaN(minute) || minute < 0 || minute > 59) minute = 0;
+  let leadDays;
+  try { leadDays = JSON.parse(getSetting('reminder_lead_days', '[1,3,7]')); } catch (e) { leadDays = [1, 3, 7]; }
+  if (!Array.isArray(leadDays) || leadDays.length === 0) leadDays = [1, 3, 7];
+  return { enabled, hour, minute, leadDays };
+}
+
+function setReminderSettings(s) {
+  if (!s || typeof s !== 'object') return;
+  setSetting('reminder_enabled', s.enabled ? '1' : '0');
+  setSetting('reminder_hour', String(Number.isFinite(s.hour) ? s.hour : 9));
+  setSetting('reminder_minute', String(Number.isFinite(s.minute) ? s.minute : 0));
+  const days = Array.isArray(s.leadDays) && s.leadDays.length ? s.leadDays : [1, 3, 7];
+  setSetting('reminder_lead_days', JSON.stringify(days));
+}
+
 module.exports = {
   db,
   getEmailConfig,
   upsertEmailConfig,
+  getSetting,
+  setSetting,
+  getReminderSettings,
+  setReminderSettings,
+  flush,
   initDefaultAdmin,
   getUserById,
   getUserByUsername,

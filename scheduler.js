@@ -7,7 +7,7 @@
  *   - Vercel 环境：由 vercel.json 的 crons 定时请求 /api/cron/reminders 触发。
  * 两种环境都调用这里的 checkAndSendReminders()。
  */
-const { db } = require('./db');
+const { db, getReminderSettings } = require('./db');
 const { sendTaskReminder } = require('./email');
 
 function getDaysUntil(endDateStr) {
@@ -28,6 +28,10 @@ async function checkAndSendReminders() {
     return { skipped: true, reason: '邮件提醒未启用' };
   }
 
+  // 页面配置的「提前提醒天数」（如 [1,3,7]），仅在这些剩余天数发送
+  const settings = getReminderSettings();
+  const leadDays = settings.leadDays || [1, 3, 7];
+
   const tasks = db.prepare(`
     SELECT * FROM tasks
     WHERE status != 'completed'
@@ -41,7 +45,8 @@ async function checkAndSendReminders() {
   for (const task of tasks) {
     const days = getDaysUntil(task.end_date);
     if (days === null) continue;
-    if (days < 0 || days > 7) continue;
+    if (days < 0) continue;                 // 已过期不重复提醒
+    if (!leadDays.includes(days)) continue; // 仅按页面配置的提前天数发送
 
     const today = new Date().toISOString().split('T')[0];
     const alreadySent = db.prepare(`

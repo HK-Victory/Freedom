@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, flush, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -13,6 +13,29 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+// 写操作（增删改）在返回响应前先 await 落盘，确保部署/重启不丢数据。
+// 只读请求（GET）不触发，避免无谓的网络写入延迟。
+app.use((req, res, next) => {
+  if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return next();
+  const origJson = res.json.bind(res);
+  const origSend = res.send.bind(res);
+  res.json = function (body) {
+    Promise.resolve()
+      .then(() => flush())
+      .catch((e) => console.error('[flush] 落盘失败:', e.message))
+      .finally(() => origJson.call(this, body));
+    return res;
+  };
+  res.send = function (body) {
+    Promise.resolve()
+      .then(() => flush())
+      .catch((e) => console.error('[flush] 落盘失败:', e.message))
+      .finally(() => origSend.call(this, body));
+    return res;
+  };
+  next();
+});
 
 // ============ 认证 API ============
 
@@ -302,6 +325,21 @@ app.put('/api/email/recipients/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// ============ 提醒设置 API（页面可配置定时发送时间 / 提前提醒天数）============
+
+app.get('/api/settings/reminder', requireAuth, requireAdmin, (req, res) => {
+  res.json(getReminderSettings());
+});
+
+app.put('/api/settings/reminder', requireAuth, requireAdmin, (req, res) => {
+  try {
+    setReminderSettings(req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ Excel 同步 API ============
 
 app.post('/api/sync', requireAuth, requireAdmin, (req, res) => {
@@ -358,15 +396,29 @@ app.get('/api/reminders', requireAuth, (req, res) => {
 });
 
 // ============ Vercel Cron 定时提醒（由 vercel.json crons 触发）============
-// 通过 CRON_SECRET 环境变量鉴权，避免被随意调用
+// 通过 CRON_SECRET 环境变量鉴权，避免被随意调用。
+// 实际发送时间由「提醒设置」页面配置（北京时间 hour），未到时间则跳过。
+function beijingNow() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000); // UTC+8
+  return { h: d.getUTCHours(), m: d.getUTCMinutes() };
+}
+
 app.get('/api/cron/reminders', async (req, res) => {
   const secret = req.query.secret || req.headers['x-cron-secret'];
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: 'unauthorized' });
   }
+  const cfg = getReminderSettings();
+  if (!cfg.enabled) {
+    return res.json({ skipped: true, reason: '提醒未启用（请在「邮件配置-定时提醒设置」中开启）' });
+  }
+  const now = beijingNow();
+  if (now.h !== cfg.hour) {
+    return res.json({ skipped: true, reason: '未到配置的发送时间', now: `${now.h}:${now.m}`, schedule: `${cfg.hour}:${cfg.minute}` });
+  }
   try {
-    await checkAndSendReminders();
-    res.json({ success: true, message: '提醒检查已执行' });
+    const r = await checkAndSendReminders();
+    res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
