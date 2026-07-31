@@ -9,7 +9,7 @@
         <a href="#/dashboard">仪表盘</a>
         <a href="#/tasks">任务管理</a>
         <a href="#/reports">报表中心</a>
-        <a href="#/settings" class="active">邮件配置</a>
+        <a href="#/settings" class="active">设置</a>
         <a href="#/admin" v-if="user?.role === 'admin'">账号管理</a>
         <a href="#" @click.prevent="logout">退出</a>
       </div>
@@ -18,8 +18,8 @@
     <div class="container">
       <div class="flex-between mb-12">
         <div>
-          <h1 class="page-title">邮件配置</h1>
-          <p class="page-subtitle">配置SMTP服务器和收件人</p>
+        <h1 class="page-title">系统设置</h1>
+        <p class="page-subtitle">邮件通知与系统配置</p>
         </div>
       </div>
 
@@ -133,7 +133,8 @@
 
       <!-- 修改密码 -->
       <div class="card mt-12" style="max-width: 400px;">
-        <div class="card-title">🔒 修改密码</div>
+        <div class="card-title">🔒 修改登录密码</div>
+        <p class="text-muted text-sm mb-12">用于修改您当前账号的登录密码，修改成功后需重新登录。</p>
         <div class="form-group">
           <label>旧密码</label>
           <input v-model="pwdForm.old_password" type="password" class="form-input" />

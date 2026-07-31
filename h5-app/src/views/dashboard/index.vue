@@ -9,7 +9,7 @@
         <a href="#/dashboard" class="active">仪表盘</a>
         <a href="#/tasks">任务管理</a>
         <a href="#/reports">报表中心</a>
-        <a href="#/settings">邮件配置</a>
+        <a href="#/settings">设置</a>
         <a href="#/admin" v-if="user?.role === 'admin'">账号管理</a>
         <a href="#" @click.prevent="logout">退出</a>
       </div>
