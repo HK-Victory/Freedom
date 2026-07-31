@@ -12,9 +12,24 @@
  *   sql.js / 数据库初始化做成幂等单例（ensureReady），在首个请求前 await 完成，
  *   之后请求直接复用，避免每次冷启动重复加载 wasm。
  */
-const { app, ensureReady } = require('../server');
+// Vercel 免费(Hobby)老项目函数默认超时仅 10s，冷启动加载 wasm + 拉取/回写 Blob 易超时。
+// 已在 vercel.json 给本函数配置 maxDuration:60，这里把自保超时对齐到 55s，避免“自己先 503”。
+process.on('unhandledRejection', (reason) => console.error('[api] unhandledRejection:', reason));
+process.on('uncaughtException', (e) => console.error('[api] uncaughtException:', e && (e.stack || e.message)));
 
-const INIT_TIMEOUT_MS = 15000;
+let app, ensureReady;
+try {
+  ({ app, ensureReady } = require('../server'));
+} catch (e) {
+  // 模块加载失败（依赖未打进函数包 / 语法错误等）：返回真实错误，避免被 Vercel 吞成通用 500。
+  console.error('[api] 模块加载失败:', e && (e.stack || e.message));
+  module.exports = async (req, res) => {
+    if (!res.headersSent) res.status(500).json({ error: '服务启动失败(模块加载): ' + ((e && e.message) || e) });
+  };
+  return;
+}
+
+const INIT_TIMEOUT_MS = 55000;
 let readyPromise = null;
 
 module.exports = async (req, res) => {

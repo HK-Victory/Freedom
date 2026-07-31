@@ -263,9 +263,8 @@ async function init() {
 
   // 确保超管账号存在（种子已含，这里幂等兜底）
   initDefaultAdmin();
-
-  // 首次把当前库（种子或已有数据）落盘到 Blob，确保后续冷启动命中、跨部署不丢
-  await flush();
+  // 注意：此处不再主动落盘到 Blob。冷启动只需把库读入内存即可返回，
+  // 数据会在首次写操作（flush 中间件）时自然持久化到 Blob，避免冷启动多一次网络往返。
 }
 
 function ensureReady() {
