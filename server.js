@@ -78,8 +78,14 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
 });
 
 // 文件上传配置
+// 重要：Vercel serverless 的代码目录 (/var/task) 是只读的，不能在代码目录下建 uploads 目录，
+// 否则模块加载阶段 multer 就会 mkdir 失败，导致整个服务启动崩溃（所有接口 500）。
+// 因此上传目录必须用 serverless 唯一可写的 /tmp（本地开发则仍用 data/uploads）。
+const UPLOAD_DIR = process.env.VERCEL
+  ? path.join('/tmp', 'task-tracker-uploads')
+  : path.join(__dirname, 'data', 'uploads');
 const upload = multer({
-  dest: path.join(__dirname, 'data', 'uploads'),
+  dest: UPLOAD_DIR,
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
