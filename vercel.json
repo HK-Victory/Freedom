@@ -9,11 +9,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 60,
-      "includeFiles": {
-        "node_modules/xlsx/**": "node_modules/xlsx/**",
-        "node_modules/sql.js/**": "node_modules/sql.js/**",
-        "node_modules/@vercel/blob/**": "node_modules/@vercel/blob/**"
-      }
+      "includeFiles": "node_modules/xlsx/**,node_modules/sql.js/**,node_modules/@vercel/blob/**"
     }
   },
   "env": {
