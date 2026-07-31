@@ -4,7 +4,7 @@
  * 说明：Vercel 免费(serverless) 环境没有常驻进程，因此不再使用 node-cron 常驻调度，
  * 而是：
  *   - 本地运行：server.js 用 setInterval 每 12 小时触发一次；
- *   - Vercel 环境：由 vercel.json 的 crons 定时请求 /api/cron/reminders 触发。
+ *   - Vercel 环境：由 GitHub Actions 定时工作流（每小时）请求 /api/cron/reminders 触发。
  * 两种环境都调用这里的 checkAndSendReminders()。
  */
 const { db, getReminderSettings } = require('./db');

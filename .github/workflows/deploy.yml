@@ -5,11 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: '0 1 * * *'   # 每天 09:00（北京时间）触发任务到期提醒
+    - cron: '0 * * * *'   # 每小时触发一次；实际发送小时由「提醒设置」页面的 hour 控制（北京时间）
 
 jobs:
   deploy:
-    # 仅在 push / 手动触发时部署，避免每日定时也重新部署
+    # 仅在 push / 手动触发时部署，避免定时任务（每小时）也触发重新部署
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
@@ -45,8 +45,8 @@ jobs:
           npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN"
 
   remind:
-    # 每日定时：调用线上 /api/cron/reminders 发送到期提醒
-    # 需在仓库 Secrets 配置 REMINDER_URL（部署成功后的 Vercel 地址）
+    # 定时提醒：每小时调用线上 /api/cron/reminders，由「提醒设置」页面的 hour 控制具体发送时刻
+    # 需在仓库 Secrets 配置 REMINDER_URL（部署成功后的 Vercel 地址）与 CRON_SECRET
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:

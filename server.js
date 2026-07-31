@@ -395,7 +395,7 @@ app.get('/api/reminders', requireAuth, (req, res) => {
   res.json(reminders);
 });
 
-// ============ Vercel Cron 定时提醒（由 vercel.json crons 触发）============
+// ============ 定时提醒（由 GitHub Actions 定时工作流调用，替代 Vercel Cron）============
 // 通过 CRON_SECRET 环境变量鉴权，避免被随意调用。
 // 实际发送时间由「提醒设置」页面配置（北京时间 hour），未到时间则跳过。
 function beijingNow() {
@@ -667,11 +667,11 @@ if (require.main === module) {
       console.log(`  访问地址: http://localhost:${PORT}`);
       console.log(`========================================\n`);
       // 本地环境：每 12 小时检查一次倒计时提醒
-      // Vercel 环境由 vercel.json 的 crons 触发 /api/cron/reminders 接管
+      // Vercel 环境由 GitHub Actions 定时工作流调用 /api/cron/reminders 接管
       setInterval(() => {
         checkAndSendReminders().catch(console.error);
       }, 12 * 60 * 60 * 1000);
-      console.log('[调度器] 本地定时提醒已启动（每12小时），Vercel 环境由 Cron 接管');
+      console.log('[调度器] 本地定时提醒已启动（每12小时），Vercel 环境由 GitHub Actions 定时工作流接管');
     });
   }).catch(err => {
     console.error('初始化失败:', err);
