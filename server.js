@@ -348,14 +348,18 @@ app.put('/api/settings/reminder', requireAuth, requireAdmin, (req, res) => {
 
 // ============ 存储状态诊断（仅超管）============
 // 用于确认 BLOB_READ_WRITE_TOKEN 是否在运行时真正生效、历史数据是否从 Blob 恢复。
-app.get('/api/storage/status', requireAuth, requireAdmin, (req, res) => {
-  res.json(getStorageStatus());
+app.get('/api/storage/status', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json(await getStorageStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/storage/save', requireAuth, requireAdmin, async (req, res) => {
   try {
     await flush();
-    res.json({ success: true, ...getStorageStatus() });
+    res.json({ success: true, ...(await getStorageStatus()) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

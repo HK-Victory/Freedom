@@ -162,13 +162,34 @@
             <span class="card-icon icon-blue">💾</span>
             <h2 class="card-title">数据存储状态</h2>
           </header>
-          <p class="text-muted text-sm mb-12">当前数据持久化方式。若 Blob 未连接，每次重新部署都会丢失数据。请务必在 Vercel 项目「Settings → Environment Variables」配置 <code>BLOB_READ_WRITE_TOKEN</code>（勾选 Production 环境）。</p>
+          <p class="text-muted text-sm mb-12">
+            当前数据持久化方式。若 Blob 未真正连接，每次重新部署都会丢失数据。
+            需在 Vercel「Settings → Environment Variables」同时配置
+            <code>BLOB_READ_WRITE_TOKEN</code> 与 <code>BLOB_STORE_ID</code>（均勾选 Production 环境）。
+          </p>
           <div class="storage-grid">
             <div class="storage-item">
-              <span class="storage-label">Blob 存储</span>
-              <span class="badge" :class="storage.blob && storage.blob.configured ? 'badge-completed' : 'badge-pending'">
-                {{ storage.blob && storage.blob.configured ? '已连接' : '未配置' }}
+              <span class="storage-label">真实连接</span>
+              <span class="badge" :class="(storage.blob && storage.blob.connected) ? 'badge-completed' : 'badge-pending'">
+                {{ storage.blob && storage.blob.connected ? '已连通 ✅' : '未连通 ❌' }}
               </span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">BLOB_TOKEN</span>
+              <span class="badge" :class="(storage.blob && storage.blob.tokenConfigured) ? 'badge-completed' : 'badge-pending'">
+                {{ storage.blob && storage.blob.tokenConfigured ? '已配置' : '缺失' }}
+              </span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">BLOB_STORE_ID</span>
+              <span class="badge" :class="(storage.blob && storage.blob.storeIdConfigured) ? 'badge-completed' : 'badge-pending'">
+                {{ storage.blob && storage.blob.storeIdConfigured ? '已配置' : '缺失' }}
+              </span>
+              <span v-if="storage.blob && storage.blob.storeId" class="storage-value code-sm">{{ storage.blob.storeId }}</span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">Blob 中已有快照</span>
+              <span class="storage-value">{{ storage.blob && storage.blob.blobExists ? '是' : '否' }}</span>
             </div>
             <div class="storage-item">
               <span class="storage-label">本次加载来源</span>
@@ -182,6 +203,9 @@
               <span class="storage-label">上次保存</span>
               <span class="storage-value">{{ storage.blob && storage.blob.lastSaveAt ? formatTime(storage.blob.lastSaveAt) : '暂无' }}</span>
             </div>
+          </div>
+          <div v-if="storage.blob && storage.blob.connectError" class="storage-error mt-12">
+            ⚠️ 连接 Blob 失败：{{ storage.blob.connectError }}
           </div>
           <div class="flex gap-8 mt-12">
             <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">
@@ -471,6 +495,22 @@ onMounted(() => {
 }
 @media (max-width: 768px) {
   .storage-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.storage-error {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.code-sm {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #93c5fd;
+  word-break: break-all;
 }
 
 /* 移动端：单列堆叠 */

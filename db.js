@@ -38,6 +38,7 @@ const LOCAL_STORE = isVercel
 // 跨部署 / 重启都不会丢失。在 Vercel 后台 “Storage” 创建 Blob 后，
 // 环境变量 BLOB_READ_WRITE_TOKEN 会自动注入，也可手动填写。
 const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+const BLOB_STORE_ID = process.env.BLOB_STORE_ID || '';
 const BLOB_KEY = 'freedom-db.sqlite';
 
 // Vercel KV（基于 Upstash）：作为 Blob 不可用时的次级持久化。
@@ -290,10 +291,13 @@ async function init() {
     console.warn('[存储] ⚠️ BLOB_READ_WRITE_TOKEN 未配置：数据仅存于本次运行内存，重新部署/重启将丢失！' +
       '请在 Vercel 项目「Settings → Environment Variables」中配置（务必勾选 Production 环境）。');
   } else {
+    const storeNote = BLOB_STORE_ID
+      ? `BLOB_STORE_ID=${BLOB_STORE_ID}`
+      : 'BLOB_STORE_ID 未设置（SDK 将从 token 解析目标 store）';
     const note = source === 'blob'
-      ? '（已从 Blob 恢复历史数据 ✅）'
+      ? '（已从 Blob 恢复历史数据 ✅��'
       : '（未找到历史快照，使用种子/本地基线）';
-    console.log(`[存储] Blob 已配置。本次加载来源: ${source} ${note}`);
+    console.log(`[存储] Blob 已配置。${storeNote}。本次加载来源: ${source} ${note}`);
   }
   // 首次启动（种子/空库）且 Blob 可用时，立即把基线落盘，避免后续冷启动反复重置
   if (BLOB_TOKEN && (source === 'seed' || source === 'embedded' || source === 'fresh')) {
@@ -491,7 +495,7 @@ function setReminderSettings(s) {
 }
 
 // -------- 存储状态诊断（供 /api/storage/status 与设置页展示）--------
-function getStorageStatus() {
+async function getStorageStatus() {
   let counts = null;
   try {
     const r = getDb().exec(
@@ -507,10 +511,35 @@ function getStorageStatus() {
       counts = o;
     }
   } catch (e) { /* ignore */ }
+
+  // 真实连接探测：用当前 token 实际 list 一次 Blob，
+  // 确认能否连通、且目标 store 中是否已存在数据库快照。
+  // 避免「变量存在但实际连不通」被静默掩盖（此前数据丢失的主因）。
+  const tokenConfigured = !!BLOB_TOKEN;
+  const storeIdConfigured = !!BLOB_STORE_ID;
+  let connected = false;
+  let blobExists = false;
+  let connectError = null;
+  if (tokenConfigured) {
+    try {
+      const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+      connected = true;
+      blobExists = !!(blobs && blobs.length);
+    } catch (e) {
+      connected = false;
+      connectError = e && e.message ? e.message : String(e);
+    }
+  }
   return {
     vercel: isVercel,
     blob: {
-      configured: !!BLOB_TOKEN,
+      tokenConfigured,
+      storeIdConfigured,
+      storeId: storeIdConfigured ? BLOB_STORE_ID : null,
+      configured: tokenConfigured,
+      connected,
+      blobExists,
+      connectError,
       lastSaveAt: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null,
       lastSaveOk: _lastSaveOk
     },
