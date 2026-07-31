@@ -184,8 +184,11 @@ async function persistBlob() {
   try {
     const bytes = exportBytes();
     if (!bytes) return false;
+    // 注意：@vercel/blob@0.27.3 的 put 仅支持 access: 'public'（传 'private' 会抛
+    // "access must be 'public'"）。Blob 通过不可预测的 store 域名 + 固定 pathname 实现
+    // "不公开列出"的访问保护；如需更强的私有性，可升级 @vercel/blob 或改用随机后缀 key。
     await put(BLOB_KEY, bytes, {
-      access: 'private',
+      access: 'public',
       token: BLOB_TOKEN,
       allowOverwrite: true,
       contentType: 'application/octet-stream'
