@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, flush, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, flush, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -341,6 +341,21 @@ app.put('/api/settings/reminder', requireAuth, requireAdmin, (req, res) => {
   try {
     setReminderSettings(req.body);
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ 存储状态诊断（仅超管）============
+// 用于确认 BLOB_READ_WRITE_TOKEN 是否在运行时真正生效、历史数据是否从 Blob 恢复。
+app.get('/api/storage/status', requireAuth, requireAdmin, (req, res) => {
+  res.json(getStorageStatus());
+});
+
+app.post('/api/storage/save', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await flush();
+    res.json({ success: true, ...getStorageStatus() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

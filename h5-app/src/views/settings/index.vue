@@ -154,12 +154,50 @@
           <p v-if="pwdMsg" class="text-muted text-xs mt-8">{{ pwdMsg }}</p>
         </section>
       </div>
+
+      <!-- 数据存储状态（仅超管） -->
+      <div class="mt-16" v-if="user?.role === 'admin'">
+        <section class="card">
+          <header class="card-head">
+            <span class="card-icon icon-blue">💾</span>
+            <h2 class="card-title">数据存储状态</h2>
+          </header>
+          <p class="text-muted text-sm mb-12">当前数据持久化方式。若 Blob 未连接，每次重新部署都会丢失数据。请务必在 Vercel 项目「Settings → Environment Variables」配置 <code>BLOB_READ_WRITE_TOKEN</code>（勾选 Production 环境）。</p>
+          <div class="storage-grid">
+            <div class="storage-item">
+              <span class="storage-label">Blob 存储</span>
+              <span class="badge" :class="storage.blob && storage.blob.configured ? 'badge-completed' : 'badge-pending'">
+                {{ storage.blob && storage.blob.configured ? '已连接' : '未配置' }}
+              </span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">本次加载来源</span>
+              <span class="storage-value">{{ loadSourceText }}</span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">任务数</span>
+              <span class="storage-value">{{ storage.counts ? storage.counts.tasks : '-' }}</span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">上次保存</span>
+              <span class="storage-value">{{ storage.blob && storage.blob.lastSaveAt ? formatTime(storage.blob.lastSaveAt) : '暂无' }}</span>
+            </div>
+          </div>
+          <div class="flex gap-8 mt-12">
+            <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">
+              {{ savingStorage ? '保存中…' : '立即保存到存储' }}
+            </button>
+            <button class="btn btn-secondary" @click="loadStorageStatus">刷新状态</button>
+          </div>
+          <p v-if="storageMsg" class="text-muted text-xs mt-8">{{ storageMsg }}</p>
+        </section>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
 
@@ -179,6 +217,26 @@ const reminder = ref({ enabled: 0, hour: 9, leadDays: [1, 3, 7] })
 const reminderMsg = ref('')
 const triggering = ref(false)
 const leadDayOptions = [1, 2, 3, 5, 7]
+
+// 数据存储状态（仅超管可见）
+const storage = ref({})
+const storageMsg = ref('')
+const savingStorage = ref(false)
+const loadSourceText = computed(() => {
+  const map = {
+    blob: 'Vercel Blob（历史数据已恢复 ✅）',
+    kv: 'Vercel KV',
+    local: '本地文件',
+    seed: '内置种子数据',
+    embedded: '内联种子数据',
+    fresh: '全新空库',
+    none: '未知'
+  }
+  return (storage.value && map[storage.value.loadSource]) || (storage.value && storage.value.loadSource) || '未知'
+})
+const formatTime = (iso) => {
+  try { return new Date(iso).toLocaleString('zh-CN') } catch (e) { return iso }
+}
 
 const loadConfig = async () => {
   try {
@@ -298,10 +356,32 @@ const triggerReminder = async () => {
   }
 }
 
+const loadStorageStatus = async () => {
+  try {
+    storage.value = await request.get('/storage/status')
+  } catch (err) { /* 非超管或无权限时静默 */ }
+}
+
+const saveStorage = async () => {
+  if (savingStorage.value) return
+  savingStorage.value = true
+  try {
+    const r = await request.post('/storage/save')
+    storage.value = r
+    storageMsg.value = r.success ? '已保存到存储' : '保存失败'
+  } catch (err) {
+    storageMsg.value = '保存失败：' + (err.error || err.message || '')
+  } finally {
+    savingStorage.value = false
+    setTimeout(() => { storageMsg.value = '' }, 3000)
+  }
+}
+
 onMounted(() => {
   loadConfig()
   loadRecipients()
   loadReminder()
+  loadStorageStatus()
 })
 </script>
 
@@ -363,6 +443,35 @@ onMounted(() => {
 .align-center { align-items: center; }
 .flex-wrap { flex-wrap: wrap; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
+
+/* 数据存储状态 */
+.storage-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.storage-item {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.storage-label { font-size: 12px; color: var(--text-secondary); }
+.storage-value { font-size: 14px; font-weight: 600; color: var(--text); }
+.card p code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #93c5fd;
+}
+@media (max-width: 768px) {
+  .storage-grid { grid-template-columns: repeat(2, 1fr); }
+}
 
 /* 移动端：单列堆叠 */
 @media (max-width: 768px) {

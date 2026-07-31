@@ -51,6 +51,11 @@ let SQL = null;
 let _db = null;
 let _ready = null;
 
+// 持久化状态（用于运行态诊断，可被 /api/storage/status 读取）
+let _loadSource = 'none';   // 'blob' | 'kv' | 'local' | 'seed' | 'embedded' | 'fresh' | 'none'
+let _lastSaveAt = 0;
+let _lastSaveOk = null;
+
 // -------- 表结构（幂等，首次启动创建）--------
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
@@ -172,8 +177,11 @@ async function persistBlob() {
       allowOverwrite: true,
       contentType: 'application/octet-stream'
     });
+    _lastSaveAt = Date.now();
+    _lastSaveOk = true;
     return true;
   } catch (e) {
+    _lastSaveOk = false;
     console.error('[Blob] 保存失败:', e.message);
     return false;
   }
@@ -241,30 +249,58 @@ async function init() {
   }
 
   let bytes = null;
+  let source = 'none';
   // 1) 优先从 Vercel Blob 读取（跨部署持久化的主存储）
   bytes = await loadFromBlob();
-  // 2) 其次 K（跨实例最新数据）
-  if (!bytes) bytes = await loadFromKV();
+  if (bytes && bytes.length) source = 'blob';
+  // 2) 其次 KV（跨实例最新数据）
+  if (!bytes || !bytes.length) {
+    bytes = await loadFromKV();
+    if (bytes && bytes.length) source = 'kv';
+  }
   // 3) 本地文件（同一实例内的可靠副本）
-  if (!bytes && fs.existsSync(LOCAL_STORE)) {
-    try { bytes = fs.readFileSync(LOCAL_STORE); } catch (e) { bytes = null; }
+  if (!bytes || !bytes.length) {
+    if (fs.existsSync(LOCAL_STORE)) {
+      try { bytes = fs.readFileSync(LOCAL_STORE); if (bytes && bytes.length) source = 'local'; } catch (e) { bytes = null; }
+    }
   }
   // 4) 仓库内置种子数据（冷启动兜底，已含 21 项任务 + 超管账号）
-  if (!bytes && fs.existsSync(SEED_PATH)) {
-    try { bytes = Buffer.from(fs.readFileSync(SEED_PATH, 'utf8'), 'base64'); } catch (e) { bytes = null; }
+  if (!bytes || !bytes.length) {
+    if (fs.existsSync(SEED_PATH)) {
+      try { bytes = Buffer.from(fs.readFileSync(SEED_PATH, 'utf8'), 'base64'); if (bytes && bytes.length) source = 'seed'; } catch (e) { bytes = null; }
+    }
   }
   // 5) 内联种子（打包进函数，避免 serverless 文件系统找不到 data/seed.b64）
-  if (!bytes && embeddedSeed) {
-    try { bytes = Buffer.from(embeddedSeed, 'base64'); } catch (e) { bytes = null; }
+  if (!bytes || !bytes.length) {
+    if (embeddedSeed) {
+      try { bytes = Buffer.from(embeddedSeed, 'base64'); if (bytes && bytes.length) source = 'embedded'; } catch (e) { bytes = null; }
+    }
   }
+  if (!bytes || !bytes.length) source = 'fresh';
 
   _db = bytes && bytes.length ? new SQL.Database(bytes) : new SQL.Database();
   _db.run(SCHEMA);
 
   // 确保超管账号存在（种子已含，这里幂等兜底）
   initDefaultAdmin();
-  // 注意：此处不再主动落盘到 Blob。冷启动只需把库读入内存即可返回，
-  // 数据会在首次写操作（flush 中间件）时自然持久化到 Blob，避免冷启动多一次网络往返。
+  _loadSource = source;
+
+  // —— 诊断日志：清楚暴露本次启动从哪个存储加载、Blob 是否可用 ——
+  if (!BLOB_TOKEN) {
+    console.warn('[存储] ⚠️ BLOB_READ_WRITE_TOKEN 未配置：数据仅存于本次运行内存，重新部署/重启将丢失！' +
+      '请在 Vercel 项目「Settings → Environment Variables」中配置（务必勾选 Production 环境）。');
+  } else {
+    const note = source === 'blob'
+      ? '（已从 Blob 恢复历史数据 ✅）'
+      : '（未找到历史快照，使用种子/本地基线）';
+    console.log(`[存储] Blob 已配置。本次加载来源: ${source} ${note}`);
+  }
+  // 首次启动（种子/空库）且 Blob 可用时，立即把基线落盘，避免后续冷启动反复重置
+  if (BLOB_TOKEN && (source === 'seed' || source === 'embedded' || source === 'fresh')) {
+    persistBlob()
+      .then(ok => console.log(`[存储] 基线数据已${ok ? '保存' : '保存失败'}到 Blob`))
+      .catch(() => {});
+  }
 }
 
 function ensureReady() {
@@ -454,6 +490,36 @@ function setReminderSettings(s) {
   setSetting('reminder_lead_days', JSON.stringify(days));
 }
 
+// -------- 存储状态诊断（供 /api/storage/status 与设置页展示）--------
+function getStorageStatus() {
+  let counts = null;
+  try {
+    const r = getDb().exec(
+      'SELECT (SELECT COUNT(*) FROM tasks) AS tasks, ' +
+      '(SELECT COUNT(*) FROM users) AS users, ' +
+      '(SELECT COUNT(*) FROM email_recipients) AS recipients'
+    );
+    if (r.length) {
+      const cols = r[0].columns;
+      const vals = r[0].values[0];
+      const o = {};
+      cols.forEach((c, i) => { o[c] = vals[i]; });
+      counts = o;
+    }
+  } catch (e) { /* ignore */ }
+  return {
+    vercel: isVercel,
+    blob: {
+      configured: !!BLOB_TOKEN,
+      lastSaveAt: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null,
+      lastSaveOk: _lastSaveOk
+    },
+    kv: { configured: !!KV_URL },
+    loadSource: _loadSource,
+    counts
+  };
+}
+
 module.exports = {
   db,
   getEmailConfig,
@@ -462,6 +528,7 @@ module.exports = {
   setSetting,
   getReminderSettings,
   setReminderSettings,
+  getStorageStatus,
   flush,
   initDefaultAdmin,
   getUserById,
