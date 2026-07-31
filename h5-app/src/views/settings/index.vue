@@ -10,6 +10,11 @@
         </div>
       </div>
 
+      <!-- 持久化告警：保存数据后若未真正落盘到 Blob，立即提示，避免「假成功真丢失」 -->
+      <div v-if="persistWarn" class="alert-banner alert-danger">
+        ⚠️ {{ persistWarn }}
+      </div>
+
       <!-- 邮件通知区 -->
       <div class="settings-grid">
         <!-- SMTP配置 -->
@@ -200,12 +205,17 @@
               <span class="storage-value">{{ storage.counts ? storage.counts.tasks : '-' }}</span>
             </div>
             <div class="storage-item">
-              <span class="storage-label">上次保存</span>
-              <span class="storage-value">{{ storage.blob && storage.blob.lastSaveAt ? formatTime(storage.blob.lastSaveAt) : '暂无' }}</span>
+              <span class="storage-label">上次保存结果</span>
+              <span class="storage-value" :class="storage.blob && storage.blob.lastSaveOk === false ? 'text-danger' : ''">
+                {{ storage.blob && storage.blob.lastSaveOk === true ? '成功 ✅' : (storage.blob && storage.blob.lastSaveOk === false ? '失败 ❌' : '暂无记录') }}<span v-if="storage.blob && storage.blob.lastSaveAt">（{{ formatTime(storage.blob.lastSaveAt) }}）</span>
+              </span>
             </div>
           </div>
           <div v-if="storage.blob && storage.blob.connectError" class="storage-error mt-12">
             ⚠️ 连接 Blob 失败：{{ storage.blob.connectError }}
+          </div>
+          <div v-if="storage.blob && storage.blob.lastSaveOk === false && storage.blob.lastSaveError" class="storage-error mt-8">
+            ⚠️ 落盘失败：{{ storage.blob.lastSaveError }}
           </div>
           <div class="flex gap-8 mt-12">
             <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">
@@ -245,6 +255,7 @@ const leadDayOptions = [1, 2, 3, 5, 7]
 // 数据存储状态（仅超管可见）
 const storage = ref({})
 const storageMsg = ref('')
+const persistWarn = ref('')
 const savingStorage = ref(false)
 const loadSourceText = computed(() => {
   const map = {
@@ -310,6 +321,7 @@ const addRecipient = async () => {
     await request.post('/email/recipients', newRecipient.value)
     newRecipient.value = { email: '', name: '' }
     loadRecipients()
+    await checkPersist()
   } catch (err) {}
 }
 
@@ -317,6 +329,7 @@ const toggleRecipient = async (r) => {
   try {
     await request.put(`/email/recipients/${r.id}`, { ...r, enabled: !r.enabled })
     loadRecipients()
+    await checkPersist()
   } catch (err) {}
 }
 
@@ -325,6 +338,7 @@ const deleteRecipient = async (r) => {
   try {
     await request.delete(`/email/recipients/${r.id}`)
     loadRecipients()
+    await checkPersist()
   } catch (err) {}
 }
 
@@ -360,6 +374,7 @@ const saveReminder = async () => {
     })
     reminderMsg.value = '提醒设置已保存'
     setTimeout(() => reminderMsg.value = '', 3000)
+    await checkPersist()
   } catch (err) {
     reminderMsg.value = '保存失败：' + (err.error || '')
   }
@@ -384,6 +399,20 @@ const loadStorageStatus = async () => {
   try {
     storage.value = await request.get('/storage/status')
   } catch (err) { /* 非超管或无权限时静默 */ }
+}
+
+// 写操作后调用：刷新存储状态；若落盘失败则弹出醒目告警，避免「保存成功但刷新丢数据」的假象
+const checkPersist = async () => {
+  try {
+    storage.value = await request.get('/storage/status')
+  } catch (err) { /* 非超管或无权限时静默 */ }
+  const b = storage.value && storage.value.blob
+  if (b && b.lastSaveOk === false) {
+    persistWarn.value = '数据已保存，但未持久化到 Blob：' + (b.lastSaveError || '未知原因') +
+      '。重新部署将丢失，请到下方「数据存储状态」检查配置（BLOB_READ_WRITE_TOKEN 须配置到 Vercel 运行时）。'
+  } else {
+    persistWarn.value = ''
+  }
 }
 
 const saveStorage = async () => {
@@ -505,6 +534,19 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.5;
   word-break: break-all;
+}
+.text-danger { color: #fca5a5; }
+.alert-banner {
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+.alert-danger {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fecaca;
 }
 .code-sm {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

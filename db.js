@@ -60,6 +60,7 @@ let _ready = null;
 let _loadSource = 'none';   // 'blob' | 'kv' | 'local' | 'seed' | 'embedded' | 'fresh' | 'none'
 let _lastSaveAt = 0;
 let _lastSaveOk = null;
+let _lastSaveError = null;
 
 // -------- 表结构（幂等，首次启动创建）--------
 const SCHEMA = `
@@ -172,7 +173,14 @@ function persistKV() {
 }
 
 async function persistBlob() {
-  if (!_db || !BLOB_TOKEN) return false;
+  if (!_db) return false;
+  if (!BLOB_TOKEN) {
+    // 凭据缺失：无法持久化，必须显式记录原因，避免「静默假成功」让数据在重新部署后丢失
+    _lastSaveOk = false;
+    _lastSaveError = 'BLOB_READ_WRITE_TOKEN 未配置：数据仅存于本次运行内存，重新部署/重启将丢失。' +
+      '请在 Vercel「Settings → Environment Variables」配置（Production 作用域），或在 GitHub Actions 变量/Secrets 中填写后重新部署。';
+    return false;
+  }
   try {
     const bytes = exportBytes();
     if (!bytes) return false;
@@ -184,10 +192,12 @@ async function persistBlob() {
     });
     _lastSaveAt = Date.now();
     _lastSaveOk = true;
+    _lastSaveError = null;
     return true;
   } catch (e) {
     _lastSaveOk = false;
-    console.error('[Blob] 保存失败:', e.message);
+    _lastSaveError = 'Blob 写入失败：' + (e && e.message ? e.message : String(e));
+    console.error('[Blob] 保存失败:', e && e.message);
     return false;
   }
 }
@@ -545,7 +555,8 @@ async function getStorageStatus() {
       blobExists,
       connectError,
       lastSaveAt: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null,
-      lastSaveOk: _lastSaveOk
+      lastSaveOk: _lastSaveOk,
+      lastSaveError: _lastSaveError
     },
     kv: { configured: !!KV_URL },
     loadSource: _loadSource,
