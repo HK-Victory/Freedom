@@ -89,7 +89,7 @@
         <!-- 定时提醒设置（仅超管） -->
         <div class="card" v-if="user?.role === 'admin'">
           <div class="card-title">⏰ 定时提醒设置</div>
-          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的每日执行时间与提前天数（北京时间）。Vercel Cron 每小时触发一次，仅在命中配置时间且任务剩余天数匹配时发送。</p>
+          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的每日执行时间与提前天数（北京时间）。定时任务每小时触发一次，仅在命中配置时间且任务剩余天数匹配时发送。也可点击下方按钮立即手动触发一次。</p>
           <div class="form-group">
             <label>启用定时提醒</label>
             <select v-model="reminder.enabled" class="form-select">
@@ -113,7 +113,12 @@
               </label>
             </div>
           </div>
-          <button class="btn btn-primary" @click="saveReminder">保存提醒设置</button>
+          <div class="flex gap-8">
+            <button class="btn btn-primary" @click="saveReminder">保存提醒设置</button>
+            <button class="btn btn-secondary" @click="triggerReminder" :disabled="triggering">
+              {{ triggering ? '触发中…' : '立即触发一次' }}
+            </button>
+          </div>
           <p v-if="reminderMsg" class="text-muted text-xs mt-8">{{ reminderMsg }}</p>
         </div>
       </div>
@@ -156,6 +161,7 @@ const pwdMsg = ref('')
 // 定时提醒设置
 const reminder = ref({ enabled: 0, hour: 9, leadDays: [1, 3, 7] })
 const reminderMsg = ref('')
+const triggering = ref(false)
 const leadDayOptions = [1, 2, 3, 5, 7]
 
 const loadConfig = async () => {
@@ -258,6 +264,21 @@ const saveReminder = async () => {
     setTimeout(() => reminderMsg.value = '', 3000)
   } catch (err) {
     reminderMsg.value = '保存失败：' + (err.error || '')
+  }
+}
+
+const triggerReminder = async () => {
+  if (triggering.value) return
+  triggering.value = true
+  reminderMsg.value = ''
+  try {
+    const r = await request.post('/reminders/trigger')
+    reminderMsg.value = `已触发检查：发送 ${r.sent || 0} 封，跳过 ${r.skipped || 0} 条${r.reason ? '（' + r.reason + '）' : ''}`
+  } catch (err) {
+    reminderMsg.value = '触发失败：' + (err.error || err.message || '')
+  } finally {
+    triggering.value = false
+    setTimeout(() => { reminderMsg.value = '' }, 6000)
   }
 }
 

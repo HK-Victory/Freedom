@@ -378,8 +378,8 @@ app.post('/api/import-excel', requireAuth, requireAdmin, upload.single('file'), 
 
 app.post('/api/reminders/trigger', requireAuth, requireAdmin, async (req, res) => {
   try {
-    await checkAndSendReminders();
-    res.json({ success: true, message: '提醒检查已执行' });
+    const r = await checkAndSendReminders();
+    res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
