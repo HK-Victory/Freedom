@@ -18,7 +18,7 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const { put, list } = require('@vercel/blob');
+const { put, list, del } = require('@vercel/blob');
 
 // 内联资源（打包进函数，避免 serverless 环境下找不到 WASM / seed 文件）
 // Vercel 的打包器(nft)无法静态追踪运行时路径，sql-wasm.wasm 与 data/seed.b64
@@ -184,15 +184,34 @@ async function persistBlob() {
   try {
     const bytes = exportBytes();
     if (!bytes) return false;
-    // 注意：@vercel/blob@0.27.3 的 put 仅支持 access: 'public'（传 'private' 会抛
-    // "access must be 'public'"）。Blob 通过不可预测的 store 域名 + 固定 pathname 实现
-    // "不公开列出"的访问保护；如需更强的私有性，可升级 @vercel/blob 或改用随机后缀 key。
-    await put(BLOB_KEY, bytes, {
-      access: 'public',
-      token: BLOB_TOKEN,
-      allowOverwrite: true,
-      contentType: 'application/octet-stream'
-    });
+    // @vercel/blob 2.x 支持 access: 'private' | 'public'。当 Vercel Blob store 在后台被配置为
+    // private 时，写入必须带 access: 'private'，否则服务端报
+    // "Cannot use public access on a private store"。
+    try {
+      await put(BLOB_KEY, bytes, {
+        access: 'private',
+        token: BLOB_TOKEN,
+        allowOverwrite: true,
+        contentType: 'application/octet-stream'
+      });
+    } catch (overwriteErr) {
+      // 兜底：若因历史快照访问模式不一致（如旧 public blob 无法被 private 直接覆盖）导致失败，
+      // 先删除旧快照再以 private 重新写入，避免再次落盘失败。
+      console.warn('[Blob] 覆盖写入失败，尝试删除旧快照后重写:', overwriteErr && overwriteErr.message);
+      try {
+        const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+        if (blobs && blobs.length) {
+          await del(blobs[0].url, { token: BLOB_TOKEN });
+        }
+      } catch (delErr) {
+        console.warn('[Blob] 删除旧快照失败（忽略）:', delErr && delErr.message);
+      }
+      await put(BLOB_KEY, bytes, {
+        access: 'private',
+        token: BLOB_TOKEN,
+        contentType: 'application/octet-stream'
+      });
+    }
     _lastSaveAt = Date.now();
     _lastSaveOk = true;
     _lastSaveError = null;
