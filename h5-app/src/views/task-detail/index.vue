@@ -1,19 +1,6 @@
 <template>
   <div class="task-detail-page">
-    <nav class="navbar">
-      <a href="#" class="navbar-brand">
-        <span class="logo">📋</span>
-        <span>闻道任务跟踪系统</span>
-      </a>
-      <div class="navbar-links">
-        <a href="#/dashboard">仪表盘</a>
-        <a href="#/tasks" class="active">任务管理</a>
-        <a href="#/reports">报表中心</a>
-        <a href="#/settings">邮件配置</a>
-        <a href="#/admin" v-if="user?.role === 'admin'">账号管理</a>
-        <a href="#" @click.prevent="logout">退出</a>
-      </div>
-    </nav>
+    <Navbar active="tasks" />
 
     <div class="container">
       <div class="flex-between mb-12">
@@ -211,6 +198,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import request from '@/utils/request'
+import Navbar from '@/components/Navbar.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -273,12 +261,6 @@ const handleDelete = async () => {
     await request.delete(`/tasks/${route.params.id}`)
     router.push('/tasks')
   } catch (err) {}
-}
-
-const logout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  router.push('/login')
 }
 
 onMounted(loadTask)

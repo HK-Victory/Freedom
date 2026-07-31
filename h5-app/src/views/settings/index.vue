@@ -1,19 +1,6 @@
 <template>
   <div class="settings-page">
-    <nav class="navbar">
-      <a href="#" class="navbar-brand">
-        <span class="logo">📋</span>
-        <span>闻道任务跟踪系统</span>
-      </a>
-      <div class="navbar-links">
-        <a href="#/dashboard">仪表盘</a>
-        <a href="#/tasks">任务管理</a>
-        <a href="#/reports">报表中心</a>
-        <a href="#/settings" class="active">设置</a>
-        <a href="#/admin" v-if="user?.role === 'admin'">账号管理</a>
-        <a href="#" @click.prevent="logout">退出</a>
-      </div>
-    </nav>
+    <Navbar active="settings" />
 
     <div class="container">
       <div class="flex-between mb-12">
@@ -152,10 +139,9 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import request from '@/utils/request'
+import Navbar from '@/components/Navbar.vue'
 
-const router = useRouter()
 const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 const config = ref({
   smtp_host: '', smtp_port: 465, smtp_user: '', smtp_pass: '',
@@ -247,12 +233,6 @@ const changePassword = async () => {
   } catch (err) {
     pwdMsg.value = err.error || '修改失败'
   }
-}
-
-const logout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  router.push('/login')
 }
 
 const loadReminder = async () => {

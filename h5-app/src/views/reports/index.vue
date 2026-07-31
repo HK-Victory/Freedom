@@ -1,19 +1,6 @@
 <template>
   <div class="reports-page">
-    <nav class="navbar">
-      <a href="#" class="navbar-brand">
-        <span class="logo">📋</span>
-        <span>闻道任务跟踪系统</span>
-      </a>
-      <div class="navbar-links">
-        <a href="#/dashboard">仪表盘</a>
-        <a href="#/tasks">任务管理</a>
-        <a href="#/reports" class="active">报表中心</a>
-        <a href="#/settings">设置</a>
-        <a href="#/admin" v-if="user?.role === 'admin'">账号管理</a>
-        <a href="#" @click.prevent="logout">退出</a>
-      </div>
-    </nav>
+    <Navbar active="reports" />
 
     <div class="container">
       <div class="flex-between mb-12">
@@ -130,9 +117,9 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '@/utils/request'
+import Navbar from '@/components/Navbar.vue'
 
 const router = useRouter()
-const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 const reportType = ref('weekly')
 const report = ref(null)
 const loading = ref(false)
@@ -153,11 +140,6 @@ const loadReport = async () => {
 }
 
 const goDetail = (id) => router.push(`/task/${id}`)
-const logout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  router.push('/login')
-}
 
 onMounted(loadReport)
 </script>

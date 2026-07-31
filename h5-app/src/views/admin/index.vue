@@ -1,19 +1,6 @@
 <template>
   <div class="admin-page">
-    <nav class="navbar">
-      <a href="#" class="navbar-brand">
-        <span class="logo">📋</span>
-        <span>闻道任务跟踪系统</span>
-      </a>
-      <div class="navbar-links">
-        <a href="#/dashboard">仪表盘</a>
-        <a href="#/tasks">任务管理</a>
-        <a href="#/reports">报表中心</a>
-        <a href="#/settings">设置</a>
-        <a href="#/admin" class="active">账号管理</a>
-        <a href="#" @click.prevent="logout">退出</a>
-      </div>
-    </nav>
+    <Navbar active="admin" />
 
     <div class="container">
       <div class="flex-between mb-12">
@@ -103,10 +90,9 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import request from '@/utils/request'
+import Navbar from '@/components/Navbar.vue'
 
-const router = useRouter()
 const currentUser = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 const users = ref([])
 const showEdit = ref(false)
@@ -179,12 +165,6 @@ const deleteUser = async (u) => {
   } catch (err) {
     alert(err.error || '删除失败')
   }
-}
-
-const logout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  router.push('/login')
 }
 
 onMounted(loadUsers)
