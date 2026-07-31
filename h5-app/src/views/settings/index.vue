@@ -3,19 +3,23 @@
     <Navbar active="settings" />
 
     <div class="container">
-      <div class="flex-between mb-12">
+      <div class="page-header">
         <div>
-        <h1 class="page-title">系统设置</h1>
-        <p class="page-subtitle">邮件通知与系统配置</p>
+          <h1 class="page-title">系统设置</h1>
+          <p class="page-subtitle">邮件通知与系统配置</p>
         </div>
       </div>
 
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <!-- 邮件通知区 -->
+      <div class="settings-grid">
         <!-- SMTP配置 -->
-        <div class="card">
-          <div class="card-title">📧 SMTP服务器配置</div>
+        <section class="card">
+          <header class="card-head">
+            <span class="card-icon icon-blue">📧</span>
+            <h2 class="card-title">SMTP 服务器配置</h2>
+          </header>
           <div class="form-group">
-            <label>SMTP服务器</label>
+            <label>SMTP 服务器</label>
             <input v-model="config.smtp_host" class="form-input" placeholder="如 smtp.qq.com" />
           </div>
           <div class="flex gap-12">
@@ -36,7 +40,7 @@
             <input v-model="config.smtp_user" class="form-input" placeholder="邮箱账号" />
           </div>
           <div class="form-group">
-            <label>密码/授权码</label>
+            <label>密码 / 授权码</label>
             <input v-model="config.smtp_pass" type="password" class="form-input" placeholder="******" />
           </div>
           <div class="form-group">
@@ -55,11 +59,14 @@
             <button class="btn btn-secondary" @click="testEmail">发送测试</button>
           </div>
           <p v-if="saveMsg" class="text-muted text-xs mt-8">{{ saveMsg }}</p>
-        </div>
+        </section>
 
         <!-- 收件人管理 -->
-        <div class="card">
-          <div class="card-title">👥 收件人管理</div>
+        <section class="card">
+          <header class="card-head">
+            <span class="card-icon icon-green">👥</span>
+            <h2 class="card-title">收件人管理</h2>
+          </header>
           <div class="flex gap-8 mb-12">
             <input v-model="newRecipient.email" class="form-input" placeholder="邮箱地址" style="flex: 2;" />
             <input v-model="newRecipient.name" class="form-input" placeholder="姓名" style="flex: 1;" />
@@ -84,11 +91,17 @@
             </div>
           </div>
           <p class="text-muted text-sm" v-else>暂无收件人</p>
-        </div>
+        </section>
+      </div>
 
+      <!-- 定时提醒设置 + 修改密码 同一行 -->
+      <div class="settings-grid mt-16">
         <!-- 定时提醒设置（仅超管） -->
-        <div class="card" v-if="user?.role === 'admin'">
-          <div class="card-title">⏰ 定时提醒设置</div>
+        <section class="card" v-if="user?.role === 'admin'">
+          <header class="card-head">
+            <span class="card-icon icon-amber">⏰</span>
+            <h2 class="card-title">定时提醒设置</h2>
+          </header>
           <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的每日执行时间与提前天数（北京时间）。定时任务每小时触发一次，仅在命中配置时间且任务剩余天数匹配时发送。也可点击下方按钮立即手动触发一次。</p>
           <div class="form-group">
             <label>启用定时提醒</label>
@@ -120,23 +133,26 @@
             </button>
           </div>
           <p v-if="reminderMsg" class="text-muted text-xs mt-8">{{ reminderMsg }}</p>
-        </div>
-      </div>
+        </section>
 
-      <!-- 修改密码 -->
-      <div class="card mt-12" style="max-width: 400px;">
-        <div class="card-title">🔒 修改登录密码</div>
-        <p class="text-muted text-sm mb-12">用于修改您当前账号的登录密码，修改成功后需重新登录。</p>
-        <div class="form-group">
-          <label>旧密码</label>
-          <input v-model="pwdForm.old_password" type="password" class="form-input" />
-        </div>
-        <div class="form-group">
-          <label>新密码</label>
-          <input v-model="pwdForm.new_password" type="password" class="form-input" />
-        </div>
-        <button class="btn btn-primary" @click="changePassword">修改密码</button>
-        <p v-if="pwdMsg" class="text-muted text-xs mt-8">{{ pwdMsg }}</p>
+        <!-- 修改密码 -->
+        <section class="card" :class="{ 'span-2': user?.role !== 'admin' }">
+          <header class="card-head">
+            <span class="card-icon icon-purple">🔒</span>
+            <h2 class="card-title">修改登录密码</h2>
+          </header>
+          <p class="text-muted text-sm mb-12">用于修改您当前账号的登录密码，修改成功后需重新登录。</p>
+          <div class="form-group">
+            <label>旧密码</label>
+            <input v-model="pwdForm.old_password" type="password" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>新密码</label>
+            <input v-model="pwdForm.new_password" type="password" class="form-input" />
+          </div>
+          <button class="btn btn-primary btn-block" @click="changePassword">修改密码</button>
+          <p v-if="pwdMsg" class="text-muted text-xs mt-8">{{ pwdMsg }}</p>
+        </section>
       </div>
     </div>
   </div>
@@ -291,7 +307,65 @@ onMounted(() => {
 
 <style scoped>
 .settings-page { min-height: 100vh; }
+
+/* 页面标题区 */
+.page-header { margin-bottom: 16px; }
+
+/* 卡片网格：两列一行 */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.mt-16 { margin-top: 16px; }
+.span-2 { grid-column: 1 / -1; }
+
+/* 卡片悬停微交互 */
+.settings-page .card {
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+.settings-page .card:hover {
+  border-color: rgba(59, 130, 246, 0.45);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+/* 卡片头部：图标 + 标题 */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text);
+}
+.icon-blue { background: rgba(59, 130, 246, 0.14); }
+.icon-green { background: rgba(34, 197, 94, 0.14); }
+.icon-amber { background: rgba(245, 158, 11, 0.16); }
+.icon-purple { background: rgba(167, 139, 250, 0.16); }
+
 .align-center { align-items: center; }
 .flex-wrap { flex-wrap: wrap; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
+
+/* 移动端：单列堆叠 */
+@media (max-width: 768px) {
+  .settings-grid { grid-template-columns: 1fr; }
+}
 </style>
