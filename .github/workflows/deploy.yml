@@ -39,10 +39,27 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_PROJECT_NAME: ${{ secrets.VERCEL_PROJECT_NAME }}
+          # Blob 持久化凭据：从仓库 Secrets 或 Variables 读取，部署时注入 Vercel 运行时。
+          # @vercel/blob 在 serverless 函数执行时从 process.env 读取 BLOB_READ_WRITE_TOKEN
+          # （storeId 由 token 自身解析），必须存在于 Vercel 运行时，否则数据每次部署都会回退种子、被清空。
+          # 同时兼容「Secrets」与「Variables」两种配置位置（优先 Secrets）。
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN || vars.BLOB_READ_WRITE_TOKEN }}
+          BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID || vars.BLOB_STORE_ID }}
         run: |
           # Vercel 项目名必须全小写，不能依赖仓库目录名（如 Freedom 大写会 400 失败）
           PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
-          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN"
+
+          # 将 Blob 凭据注入 Vercel 运行时环境变量（仅非空时注入，避免覆盖/清空已手动配置的值）
+          EXTRA_ENV=""
+          if [ -n "$BLOB_READ_WRITE_TOKEN" ]; then
+            EXTRA_ENV="$EXTRA_ENV -e BLOB_READ_WRITE_TOKEN=$BLOB_READ_WRITE_TOKEN"
+          fi
+          if [ -n "$BLOB_STORE_ID" ]; then
+            EXTRA_ENV="$EXTRA_ENV -e BLOB_STORE_ID=$BLOB_STORE_ID"
+          fi
+
+          # shellcheck disable=SC2086
+          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN" $EXTRA_ENV
 
   remind:
     # 定时提醒：每小时调用线上 /api/cron/reminders，由「提醒设置」页面的 hour 控制具体发送时刻

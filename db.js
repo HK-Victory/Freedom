@@ -35,8 +35,12 @@ const LOCAL_STORE = isVercel
   : path.join(__dirname, 'data', 'db.store');
 
 // Vercel Blob（推荐的主持久化方案）：把整个 sql.js 数据库文件存到 Blob，
-// 跨部署 / 重启都不会丢失。在 Vercel 后台 “Storage” 创建 Blob 后，
-// 环境变量 BLOB_READ_WRITE_TOKEN 会自动注入，也可手动填写。
+// 跨部署 / 重启都不会丢失。
+// 关键：@vercel/blob 在 serverless 函数执行时从 process.env.BLOB_READ_WRITE_TOKEN 读取凭据
+// （storeId 由 token 自身解析，SDK 并不读取 BLOB_STORE_ID 环境变量）。
+// 该变量必须存在于 Vercel「运行时」环境——由 .github/workflows/deploy.yml 在部署时通过
+// `vercel deploy -e` 注入（读取仓库 Secrets/Variables 中的 BLOB_READ_WRITE_TOKEN），
+// 切勿写进 vercel.json（会泄露密钥、且不会进入运行时）。
 const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
 const BLOB_STORE_ID = process.env.BLOB_STORE_ID || '';
 const BLOB_KEY = 'freedom-db.sqlite';
