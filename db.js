@@ -61,6 +61,7 @@ let _loadSource = 'none';   // 'blob' | 'kv' | 'local' | 'seed' | 'embedded' | '
 let _lastSaveAt = 0;
 let _lastSaveOk = null;
 let _lastSaveError = null;
+let _lastLoadedAt = 0;      // 最近一次从 Blob 成功加载快照的时间戳（毫秒），用于多实例写前对账
 
 // -------- 表结构（幂等，首次启动创建）--------
 const SCHEMA = `
@@ -276,7 +277,12 @@ async function loadFromBlob() {
           continue;
         }
         const buf = Buffer.from(await r.arrayBuffer());
-        if (buf && buf.length) return buf;
+        if (buf && buf.length) {
+          // 记录加载时间，供写前对账（reconcileFromBlob）判断是否落后
+          const ua = blob.uploadedAt ? new Date(blob.uploadedAt).getTime() : Date.now();
+          _lastLoadedAt = ua;
+          return buf;
+        }
       } catch (err) {
         console.warn('[Blob] 加载候选异常:', err && err.message);
       }
@@ -286,6 +292,48 @@ async function loadFromBlob() {
     console.error('[Blob] 读取失败:', e.message);
   }
   return null;
+}
+
+// -------- 写前对账（多实例防「后写覆盖」）--------
+// serverless 下可能存在多个 warm 实例，各自持有独立内存库。若某实例内存库落后
+// 于 Blob 中最新快照（别的实例已落盘新数据），直接 overwrite 会把他人改动冲掉，
+// 造成「编辑完、重部署/再次写入后数据消失」。写请求处理前先拉取 Blob 最新快照，
+// 若其比本地更新则替换内存库，从而把本次改动叠加在最新状态之上，避免互相覆盖。
+async function fetchBlobBytes(blob) {
+  const candidates = [];
+  if (blob.url) candidates.push({ url: blob.url, auth: true });
+  if (blob.downloadUrl) candidates.push({ url: blob.downloadUrl, auth: false });
+  for (const c of candidates) {
+    try {
+      const headers = c.auth ? { authorization: `Bearer ${BLOB_TOKEN}` } : undefined;
+      const r = await fetch(c.url, headers ? { headers } : undefined);
+      if (!r.ok) continue;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf && buf.length) return buf;
+    } catch (err) {
+      console.warn('[reconcile] 候选加载异常:', err && err.message);
+    }
+  }
+  return null;
+}
+
+async function reconcileFromBlob() {
+  if (!_db || !BLOB_TOKEN) return;
+  try {
+    const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+    if (!blobs || !blobs.length) return;
+    const ua = blobs[0].uploadedAt ? new Date(blobs[0].uploadedAt).getTime() : 0;
+    if (ua <= _lastLoadedAt) return; // 本地已是最新，无需对账
+    const buf = await fetchBlobBytes(blobs[0]);
+    if (buf && buf.length) {
+      _db = new SQL.Database(buf);
+      _db.run(SCHEMA);
+      _lastLoadedAt = ua;
+      console.log('[reconcile] 已从 Blob 同步最新快照，避免覆盖他人改动');
+    }
+  } catch (e) {
+    console.error('[reconcile] 对账失败（忽略，沿用本地内存库）:', e && e.message);
+  }
 }
 
 // -------- 初始化（异步，serverless 冷启动只跑一次）--------
@@ -549,6 +597,8 @@ function getReminderSettings() {
   let leadDays;
   try { leadDays = JSON.parse(getSetting('reminder_lead_days', '[1,3,7]')); } catch (e) { leadDays = [1, 3, 7]; }
   if (!Array.isArray(leadDays) || leadDays.length === 0) leadDays = [1, 3, 7];
+  leadDays = leadDays.map(Number).filter(n => Number.isFinite(n) && n >= 0); // 统一为数字，避免匹配失效
+  if (leadDays.length === 0) leadDays = [1, 3, 7];
   return { enabled, hour, minute, leadDays };
 }
 
@@ -557,8 +607,10 @@ function setReminderSettings(s) {
   setSetting('reminder_enabled', s.enabled ? '1' : '0');
   setSetting('reminder_hour', String(Number.isFinite(s.hour) ? s.hour : 9));
   setSetting('reminder_minute', String(Number.isFinite(s.minute) ? s.minute : 0));
-  const days = Array.isArray(s.leadDays) && s.leadDays.length ? s.leadDays : [1, 3, 7];
-  setSetting('reminder_lead_days', JSON.stringify(days));
+  const days = Array.isArray(s.leadDays) && s.leadDays.length
+    ? s.leadDays.map(Number).filter(n => Number.isFinite(n) && n >= 0)
+    : [1, 3, 7];
+  setSetting('reminder_lead_days', JSON.stringify(days.length ? days : [1, 3, 7]));
 }
 
 // -------- 存储状态诊断（供 /api/storage/status 与设置页展示）--------
@@ -619,10 +671,13 @@ async function getStorageStatus() {
 
 // 最近一次落盘结果（供写接口在响应中注入 persistWarning，统一暴露持久化失败）
 function getLastSave() {
+  // 注意：即便 token 未配置（configured=false），只要确实发生过写且未成功落盘，
+  // 就应判定为失败并告警，否则「未配置凭据 → 数据仅存内存 → 重部署丢失」会被静默掩盖。
+  const ok = !!BLOB_TOKEN && _lastSaveOk === true;
   return {
     configured: !!BLOB_TOKEN,
-    ok: _lastSaveOk,
-    error: _lastSaveError,
+    ok,
+    error: _lastSaveError || (!BLOB_TOKEN ? 'BLOB_READ_WRITE_TOKEN 未配置到运行时：数据仅存于本次运行内存，重新部署/重启将丢失。' : null),
     at: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null
   };
 }
@@ -631,6 +686,7 @@ module.exports = {
   db,
   getEmailConfig,
   getLastSave,
+  reconcileFromBlob,
   upsertEmailConfig,
   getSetting,
   setSetting,

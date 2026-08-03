@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, flush, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, flush, getLastSave, reconcileFromBlob, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -20,6 +20,17 @@ app.use(express.json({ limit: '10mb' }));
 // 该机制统一覆盖所有写接口（SMTP 配置 / 收件人 / 提醒设置 / 用户 / 任务 等），无需逐个处理。
 app.use((req, res, next) => {
   if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return next();
+  // 写前先从 Blob 拉取最新快照并据其对账，避免多实例各自持有旧内存库、后写覆盖丢失他人改动
+  // （这正是「编辑完状态、重部署/再次写入后消失」的根因之一）。
+  Promise.resolve()
+    .then(() => reconcileFromBlob())
+    .catch((e) => console.error('[reconcile] 写前对账失败（忽略）:', e && e.message))
+    .finally(() => next());
+});
+
+// 写后落盘 + 失败可见化（与写前对账分开，保证响应流程清晰）
+app.use((req, res, next) => {
+  if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return next();
   const origJson = res.json.bind(res);
   const origSend = res.send.bind(res);
   res.json = function (body) {
@@ -27,7 +38,8 @@ app.use((req, res, next) => {
       .then(() => flush())
       .then(() => {
         const ls = getLastSave();
-        if (ls.configured && ls.ok === false && body && typeof body === 'object' && !Array.isArray(body)) {
+        // ls.ok 已统一：token 未配置或落盘失败均为 false，确保任何持久化失败都对前端可见
+        if (ls.ok === false && body && typeof body === 'object' && !Array.isArray(body)) {
           body = { ...body, persistWarning: ls.error || '数据未持久化到 Blob，重新部署将丢失' };
         }
         origJson.call(this, body);
@@ -417,7 +429,7 @@ app.post('/api/import-excel', requireAuth, requireAdmin, upload.single('file'), 
 
 app.post('/api/reminders/trigger', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const r = await checkAndSendReminders();
+    const r = await checkAndSendReminders({ includeOverdue: true });
     res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -456,7 +468,8 @@ app.get('/api/cron/reminders', async (req, res) => {
     return res.json({ skipped: true, reason: '未到配置的发送时间', now: `${now.h}:${now.m}`, schedule: `${cfg.hour}:${cfg.minute}` });
   }
   try {
-    const r = await checkAndSendReminders();
+    // 定时任务：严格遵守页面配置的「提前提醒天数」，同时对已过期任务也提醒
+    const r = await checkAndSendReminders({ includeOverdue: true, strictLeadDays: true });
     res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });

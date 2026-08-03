@@ -367,12 +367,17 @@ const loadReminder = async () => {
 
 const saveReminder = async () => {
   try {
+    // 将提前天数统一转为数字，避免字符串/数字混用导致「配置未生效」
+    const leadDays = (reminder.value.leadDays || [])
+      .map(Number)
+      .filter(n => Number.isFinite(n) && n >= 0);
     await request.put('/settings/reminder', {
-      enabled: reminder.value.enabled ? true : false,
+      enabled: !!reminder.value.enabled,
       hour: Number(reminder.value.hour) || 0,
       minute: 0,
-      leadDays: reminder.value.leadDays
+      leadDays: leadDays.length ? leadDays : [1, 3, 7]
     })
+    await loadReminder() // 回读确认保存结果，确保页面与后端一致
     reminderMsg.value = '提醒设置已保存'
     setTimeout(() => reminderMsg.value = '', 3000)
     await checkPersist()
@@ -387,7 +392,11 @@ const triggerReminder = async () => {
   reminderMsg.value = ''
   try {
     const r = await request.post('/reminders/trigger')
-    reminderMsg.value = `已触发检查：发送 ${r.sent || 0} 封，跳过 ${r.skipped || 0} 条${r.reason ? '（' + r.reason + '）' : ''}`
+    const parts = [`已触发检查：发送 ${r.sent || 0} 封`]
+    if (r.overdue) parts.push(`（含逾期 ${r.overdue} 封）`)
+    parts.push(`，跳过 ${r.skipped || 0} 条`)
+    if (r.reason) parts.push(`（${r.reason}）`)
+    reminderMsg.value = parts.join('')
   } catch (err) {
     reminderMsg.value = '触发失败：' + (err.error || err.message || '')
   } finally {

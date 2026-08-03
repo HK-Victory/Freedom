@@ -19,13 +19,16 @@ function getDaysUntil(endDateStr) {
   return Math.round((end - today) / (1000 * 60 * 60 * 24));
 }
 
-async function checkAndSendReminders() {
+async function checkAndSendReminders(options = {}) {
+  // includeOverdue: 是否对「已过期」任务也发送提醒（默认开启）
+  // strictLeadDays: 是否严格只按页面配置的提前天数发送（手动触发可放宽）
+  const { includeOverdue = true, strictLeadDays = false } = options;
   console.log(`[${new Date().toLocaleString('zh-CN')}] 开始检查任务倒计时提醒...`);
 
   const cfg = db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
   if (!cfg || !cfg.enabled) {
     console.log('  邮件提醒未启用，跳过');
-    return { skipped: true, reason: '邮件提醒未启用' };
+    return { skipped: true, reason: '邮件提醒未启用（请在「系统设置-邮件配置」中启用并配置SMTP）' };
   }
 
   // 页面配置的「提前提醒天数」（如 [1,3,7]），仅在这些剩余天数发送
@@ -41,12 +44,24 @@ async function checkAndSendReminders() {
 
   let sentCount = 0;
   let skipCount = 0;
+  let overdueCount = 0;
 
   for (const task of tasks) {
     const days = getDaysUntil(task.end_date);
     if (days === null) continue;
-    if (days < 0) continue;                 // 已过期不重复提醒
-    if (!leadDays.includes(days)) continue; // 仅按页面配置的提前天数发送
+
+    // 判定该任务是否需要发送提醒
+    let shouldRemind = false;
+    if (days < 0) {
+      shouldRemind = includeOverdue;              // 已过期任务：默认纳入提醒
+    } else if (days === 0) {
+      shouldRemind = true;                        // 截止当天：必提醒
+    } else if (strictLeadDays) {
+      shouldRemind = leadDays.includes(days);     // 定时任务：仅按配置的提前天数
+    } else {
+      shouldRemind = true;                        // 手动触发：放宽，所有未过期且未提醒过的都发
+    }
+    if (!shouldRemind) continue;
 
     const today = new Date().toISOString().split('T')[0];
     const alreadySent = db.prepare(`
@@ -70,7 +85,9 @@ async function checkAndSendReminders() {
         db.prepare(`UPDATE reminders SET sent = 1, sent_at = datetime('now','localtime') WHERE task_id = ? AND reminder_date = ?`)
           .run(task.task_id, today);
         sentCount++;
-        console.log(`  ✅ ${task.task_id} ${task.name} - 倒计时${days}天提醒已发送`);
+        if (days < 0) overdueCount++;
+        const label = days < 0 ? `逾期${-days}天` : (days === 0 ? '今日截止' : `倒计时${days}天`);
+        console.log(`  ✅ ${task.task_id} ${task.name} - ${label}提醒已发送`);
       } else {
         console.log(`  ⏭️  ${task.task_id} ${task.name} - 跳过: ${result.reason}`);
       }
@@ -79,8 +96,8 @@ async function checkAndSendReminders() {
     }
   }
 
-  console.log(`  完成: 发送${sentCount}封, 跳过${skipCount}条`);
-  return { sent: sentCount, skipped: skipCount };
+  console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 跳过${skipCount}条`);
+  return { sent: sentCount, skipped: skipCount, overdue: overdueCount };
 }
 
 module.exports = { checkAndSendReminders, getDaysUntil };

@@ -70,9 +70,22 @@ async function sendTaskReminder(task, daysBefore) {
   const priorityColors = { '高': '#dc2626', '中': '#f59e0b', '低': '#10b981' };
   const priorityColor = priorityColors[task.priority] || '#6b7280';
 
-  const subject = daysBefore === 0
-    ? `🚨【今日截止】${task.name}`
-    : `⏰【倒计时${daysBefore}天】${task.name}`;
+  // 根据剩余天数生成标题与提示文案（支持「逾期 / 今日截止 / 倒计时」三种状态）
+  let subject, bannerText, bannerColor, boxBg, boxBorder;
+  if (daysBefore < 0) {
+    const overdue = -daysBefore;
+    subject = `🚨【已逾期${overdue}天】${task.name}`;
+    bannerText = `⚠️ 此任务已逾期 ${overdue} 天，请尽快处理！`;
+    bannerColor = '#dc2626'; boxBg = '#fef2f2'; boxBorder = '#dc2626';
+  } else if (daysBefore === 0) {
+    subject = `🚨【今日截止】${task.name}`;
+    bannerText = '⚠️ 此任务今日截止！请确保按时完成。';
+    bannerColor = '#dc2626'; boxBg = '#fef2f2'; boxBorder = '#dc2626';
+  } else {
+    subject = `⏰【倒计时${daysBefore}天】${task.name}`;
+    bannerText = `⏰ 距截止日期仅剩 ${daysBefore} 天`;
+    bannerColor = '#92400e'; boxBg = '#fffbeb'; boxBorder = '#f59e0b';
+  }
 
   const toList = recipients.map(r => r.email).join(', ');
 
@@ -83,9 +96,9 @@ async function sendTaskReminder(task, daysBefore) {
         <h2 style="margin: 0; color: #1e293b; font-size: 20px;">${task.name}</h2>
         <span style="background: ${priorityColor}; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">${task.priority || '中'}优先级</span>
       </div>
-      <div style="background: ${daysBefore === 0 ? '#fef2f2' : '#fffbeb'}; border-left: 4px solid ${daysBefore === 0 ? '#dc2626' : '#f59e0b'}; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px;">
-        <p style="margin: 0; font-size: 16px; color: ${daysBefore === 0 ? '#dc2626' : '#92400e'}; font-weight: 600;">
-          ${daysBefore === 0 ? '⚠️ 此任务今日截止！请确保按时完成。' : `⏰ 距截止日期仅剩 ${daysBefore} 天`}
+      <div style="background: ${boxBg}; border-left: 4px solid ${boxBorder}; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px;">
+        <p style="margin: 0; font-size: 16px; color: ${bannerColor}; font-weight: 600;">
+          ${bannerText}
         </p>
         <p style="margin: 4px 0 0; font-size: 13px; color: #6b7280;">截止时间：${task.end_date}</p>
       </div>
@@ -114,8 +127,9 @@ async function sendTaskReminder(task, daysBefore) {
     html
   });
 
+  const logLabel = daysBefore < 0 ? `逾期${-daysBefore}天` : (daysBefore === 0 ? '今日截止' : `倒计时${daysBefore}天`);
   db.prepare(`INSERT INTO task_logs (task_id, action, content, operator) VALUES (?, ?, ?, ?)`)
-    .run(task.task_id, 'email_reminder', `发送倒计时${daysBefore}天提醒邮件至 ${toList}`, '系统');
+    .run(task.task_id, 'email_reminder', `发送${logLabel}提醒邮件至 ${toList}`, '系统');
 
   return { sent: true, to: toList, messageId: info.messageId };
 }
