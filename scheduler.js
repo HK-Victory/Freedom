@@ -22,7 +22,8 @@ function getDaysUntil(endDateStr) {
 async function checkAndSendReminders(options = {}) {
   // includeOverdue: 是否对「已过期」任务也发送提醒（默认开启）
   // strictLeadDays: 是否严格只按页面配置的提前天数发送（手动触发可放宽）
-  const { includeOverdue = true, strictLeadDays = false } = options;
+  // force: 是否忽略当日已发送去重（手动「立即触发」用，确保点击即重发，含逾期）
+  const { includeOverdue = true, strictLeadDays = false, force = false } = options;
   console.log(`[${new Date().toLocaleString('zh-CN')}] 开始检查任务倒计时提醒...`);
 
   const cfg = db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
@@ -71,7 +72,8 @@ async function checkAndSendReminders(options = {}) {
       WHERE task_id = ? AND reminder_date = ? AND sent = 1
     `).get(task.task_id, today);
 
-    if (alreadySent) {
+    // 手动「立即触发」(force) 时忽略当日去重，强制重新发送（含逾期），确保点击即生效
+    if (!force && alreadySent) {
       skipCount++;
       continue;
     }

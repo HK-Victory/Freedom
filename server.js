@@ -429,7 +429,7 @@ app.post('/api/import-excel', requireAuth, requireAdmin, upload.single('file'), 
 
 app.post('/api/reminders/trigger', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const r = await checkAndSendReminders({ includeOverdue: true });
+    const r = await checkAndSendReminders({ includeOverdue: true, force: true });
     res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
