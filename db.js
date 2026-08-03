@@ -62,6 +62,7 @@ let _lastSaveAt = 0;
 let _lastSaveOk = null;
 let _lastSaveError = null;
 let _lastLoadedAt = 0;      // 最近一次从 Blob 成功加载快照的时间戳（毫秒），用于多实例写前对账
+let _blobLoadError = null;  // 最近一次 Blob 加载（快照存在但读取失败）的错误，供 /api/storage/status 暴露
 
 // -------- 表结构（幂等，首次启动创建）--------
 const SCHEMA = `
@@ -256,18 +257,29 @@ async function loadFromKV() {
 
 async function loadFromBlob() {
   if (!BLOB_TOKEN) return null;
+  // 先探测快照是否存在：不存在则直接返回（这是「真·空库」，无需重试）。
+  // 若 list 本身抛错（连接/鉴权抖动），返回 null 由上层决定是否回退。
+  let meta;
   try {
-    const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
-    if (!blobs || !blobs.length) return null;
-    const blob = blobs[0];
+    meta = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+  } catch (e) {
+    console.error('[Blob] list 失败（连接/鉴权异常）:', e && e.message);
+    return null;
+  }
+  if (!meta.blobs || !meta.blobs.length) return null;
 
-    // 私有 blob：list 返回的 downloadUrl 为空，必须用 Bearer token 直接拉取 url
-    //（与 SDK 的 get() 内部行为一致：fetch(url, { authorization: 'Bearer <token>' })）。
-    // 若为公开 blob（downloadUrl 存在）则优先走 downloadUrl（免鉴权）。按顺序尝试，任一成功即返回。
-    const candidates = [];
-    if (blob.url) candidates.push({ url: blob.url, auth: true });
-    if (blob.downloadUrl) candidates.push({ url: blob.downloadUrl, auth: false });
+  const blob = meta.blobs[0];
+  // 私有 blob：list 返回的 downloadUrl 为空，必须用 Bearer token 直接拉取 url
+  //（与 SDK 的 get() 内部行为一致：fetch(url, { authorization: 'Bearer <token>' })）。
+  // 若为公开 blob（downloadUrl 存在）则优先走 downloadUrl（免鉴权）。按顺序尝试，任一成功即返回。
+  const candidates = [];
+  if (blob.url) candidates.push({ url: blob.url, auth: true });
+  if (blob.downloadUrl) candidates.push({ url: blob.downloadUrl, auth: false });
 
+  // 快照确实「存在」但读取可能因网络抖动瞬时失败：做有限重试，
+  // 避免刚部署/冷启动时把「读不到」误判成「无数据」而回退种子，造成「重部署后数据丢失」假象。
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
     for (const c of candidates) {
       try {
         const headers = c.auth ? { authorization: `Bearer ${BLOB_TOKEN}` } : undefined;
@@ -281,16 +293,18 @@ async function loadFromBlob() {
           // 记录加载时间，供写前对账（reconcileFromBlob）判断是否落后
           const ua = blob.uploadedAt ? new Date(blob.uploadedAt).getTime() : Date.now();
           _lastLoadedAt = ua;
+          _blobLoadError = null; // 本次成功，清除历史错误标记
           return buf;
         }
       } catch (err) {
-        console.warn('[Blob] 加载候选异常:', err && err.message);
+        lastErr = err && err.message;
+        console.warn(`[Blob] 加载候选异常（第 ${attempt} 次）:`, lastErr);
       }
     }
-    console.error('[Blob] 所有加载候选均失败（请检查 BLOB_READ_WRITE_TOKEN 是否对该 store 有效）');
-  } catch (e) {
-    console.error('[Blob] 读取失败:', e.message);
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
   }
+  console.error('[Blob] 所有加载候选均失败（快照存在但读取失败，请检查 BLOB_READ_WRITE_TOKEN 是否对该 store 有效）:', lastErr);
+  _blobLoadError = lastErr || '快照存在但读取失败';
   return null;
 }
 
@@ -407,11 +421,15 @@ async function init() {
   // 首次启动（种子/空库）且 Blob 可用、且 Blob 中尚无历史快照时，才把基线落盘；
   // 若 Blob 中已存在快照（即便本次因故没加载成功），绝不覆盖，避免把历史数据冲掉。
   if (BLOB_TOKEN && (source === 'seed' || source === 'embedded' || source === 'fresh')) {
-    let blobExistsNow = false;
+    // 基线落盘前再次确认 Blob 中是否已有快照。list 若抛异常（网络抖动），
+    // 一律「假定存在」并跳过落盘——宁可本次不写、也绝不拿种子覆盖真实数据。
+    let blobExistsNow = true; // 默认保守：不确定时视为存在
     try {
       const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
       blobExistsNow = !!(blobs && blobs.length);
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.warn('[存储] 基线落盘前 list 失败，保守跳过以免覆盖已有快照:', e && e.message);
+    }
     if (!blobExistsNow) {
       persistBlob()
         .then(ok => console.log(`[存储] 基线数据已${ok ? '保存' : '保存失败'}到 Blob`))
@@ -659,6 +677,7 @@ async function getStorageStatus() {
       connected,
       blobExists,
       connectError,
+      loadError: _blobLoadError,
       lastSaveAt: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null,
       lastSaveOk: _lastSaveOk,
       lastSaveError: _lastSaveError

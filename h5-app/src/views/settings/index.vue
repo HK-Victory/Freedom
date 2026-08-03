@@ -231,7 +231,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
 
@@ -440,19 +440,14 @@ const saveStorage = async () => {
   }
 }
 
-// 全局持久化告警（由 request 拦截器在任意写接口落盘失败时广播）
-const onPersistWarning = (e) => { persistWarn.value = e.detail }
+// 全局持久化告警由 App.vue 统一展示（任意写接口落盘失败都会弹横幅），
+// 本页仅保留「数据存储状态」检查时返回的持久化失败提示（storage 检查专用）。
 
 onMounted(() => {
   loadConfig()
   loadRecipients()
   loadReminder()
   loadStorageStatus()
-  window.addEventListener('app:persist-warning', onPersistWarning)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('app:persist-warning', onPersistWarning)
 })
 </script>
 
