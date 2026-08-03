@@ -258,9 +258,30 @@ async function loadFromBlob() {
   try {
     const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
     if (!blobs || !blobs.length) return null;
-    const r = await fetch(blobs[0].downloadUrl);
-    if (!r.ok) return null;
-    return Buffer.from(await r.arrayBuffer());
+    const blob = blobs[0];
+
+    // 私有 blob：list 返回的 downloadUrl 为空，必须用 Bearer token 直接拉取 url
+    //（与 SDK 的 get() 内部行为一致：fetch(url, { authorization: 'Bearer <token>' })）。
+    // 若为公开 blob（downloadUrl 存在）则优先走 downloadUrl（免鉴权）。按顺序尝试，任一成功即返回。
+    const candidates = [];
+    if (blob.url) candidates.push({ url: blob.url, auth: true });
+    if (blob.downloadUrl) candidates.push({ url: blob.downloadUrl, auth: false });
+
+    for (const c of candidates) {
+      try {
+        const headers = c.auth ? { authorization: `Bearer ${BLOB_TOKEN}` } : undefined;
+        const r = await fetch(c.url, headers ? { headers } : undefined);
+        if (!r.ok) {
+          console.warn(`[Blob] 加载候选失败 (${r.status} ${r.statusText}): ${c.url}`);
+          continue;
+        }
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf && buf.length) return buf;
+      } catch (err) {
+        console.warn('[Blob] 加载候选异常:', err && err.message);
+      }
+    }
+    console.error('[Blob] 所有加载候选均失败（请检查 BLOB_READ_WRITE_TOKEN 是否对该 store 有效）');
   } catch (e) {
     console.error('[Blob] 读取失败:', e.message);
   }
@@ -335,11 +356,21 @@ async function init() {
       : '（未找到历史快照，使用种子/本地基线）';
     console.log(`[存储] Blob 已配置。${storeNote}。本次加载来源: ${source} ${note}`);
   }
-  // 首次启动（种子/空库）且 Blob 可用时，立即把基线落盘，避免后续冷启动反复重置
+  // 首次启动（种子/空库）且 Blob 可用、且 Blob 中尚无历史快照时，才把基线落盘；
+  // 若 Blob 中已存在快照（即便本次因故没加载成功），绝不覆盖，避免把历史数据冲掉。
   if (BLOB_TOKEN && (source === 'seed' || source === 'embedded' || source === 'fresh')) {
-    persistBlob()
-      .then(ok => console.log(`[存储] 基线数据已${ok ? '保存' : '保存失败'}到 Blob`))
-      .catch(() => {});
+    let blobExistsNow = false;
+    try {
+      const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
+      blobExistsNow = !!(blobs && blobs.length);
+    } catch (e) { /* ignore */ }
+    if (!blobExistsNow) {
+      persistBlob()
+        .then(ok => console.log(`[存储] 基线数据已${ok ? '保存' : '保存失败'}到 Blob`))
+        .catch(() => {});
+    } else {
+      console.warn('[存储] Blob 中已存在历史快照，跳过基线落盘以免覆盖（可通过 /api/storage/status 检查加载来源）');
+    }
   }
 }
 
