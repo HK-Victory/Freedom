@@ -391,7 +391,7 @@ const triggerReminder = async () => {
   triggering.value = true
   reminderMsg.value = ''
   try {
-    const r = await request.post('/reminders/trigger')
+    const r = await request.post('/reminders/trigger', {}, { timeout: 55000 })
     const parts = [`已触发检查：发送 ${r.sent || 0} 封`]
     if (r.overdue) parts.push(`（含逾期 ${r.overdue} 封）`)
     parts.push(`，跳过 ${r.skipped || 0} 条`)

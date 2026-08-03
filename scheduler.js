@@ -46,6 +46,9 @@ async function checkAndSendReminders(options = {}) {
   let skipCount = 0;
   let overdueCount = 0;
 
+  // 阶段一：判定需提醒的任务并预写 reminders 记录（快，串行）
+  const today = new Date().toISOString().split('T')[0];
+  const targets = [];
   for (const task of tasks) {
     const days = getDaysUntil(task.end_date);
     if (days === null) continue;
@@ -63,7 +66,6 @@ async function checkAndSendReminders(options = {}) {
     }
     if (!shouldRemind) continue;
 
-    const today = new Date().toISOString().split('T')[0];
     const alreadySent = db.prepare(`
       SELECT id FROM reminders
       WHERE task_id = ? AND reminder_date = ? AND sent = 1
@@ -79,24 +81,37 @@ async function checkAndSendReminders(options = {}) {
       VALUES (?, ?, ?, 0)
     `).run(task.task_id, today, days);
 
-    try {
-      const result = await sendTaskReminder(task, days);
-      if (result.sent) {
-        db.prepare(`UPDATE reminders SET sent = 1, sent_at = datetime('now','localtime') WHERE task_id = ? AND reminder_date = ?`)
-          .run(task.task_id, today);
-        sentCount++;
-        if (days < 0) overdueCount++;
-        const label = days < 0 ? `逾期${-days}天` : (days === 0 ? '今日截止' : `倒计时${days}天`);
-        console.log(`  ✅ ${task.task_id} ${task.name} - ${label}提醒已发送`);
-      } else {
-        console.log(`  ⏭️  ${task.task_id} ${task.name} - 跳过: ${result.reason}`);
-      }
-    } catch (err) {
-      console.error(`  ❌ ${task.task_id} ${task.name} - 发送失败: ${err.message}`);
-    }
+    targets.push({ task, days });
   }
 
-  console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 跳过${skipCount}条`);
+  // 阶段二：有限并发发送（默认 5 路），缩短整体耗时，避免单请求超时
+  const CONCURRENCY = 5;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const i = cursor++;
+      const { task, days } = targets[i];
+      try {
+        const result = await sendTaskReminder(task, days);
+        if (result.sent) {
+          db.prepare(`UPDATE reminders SET sent = 1, sent_at = datetime('now','localtime') WHERE task_id = ? AND reminder_date = ?`)
+            .run(task.task_id, today);
+          sentCount++;
+          if (days < 0) overdueCount++;
+          const label = days < 0 ? `逾期${-days}天` : (days === 0 ? '今日截止' : `倒计时${days}天`);
+          console.log(`  ✅ ${task.task_id} ${task.name} - ${label}提醒已发送`);
+        } else {
+          console.log(`  ⏭️  ${task.task_id} ${task.name} - 跳过: ${result.reason}`);
+        }
+      } catch (err) {
+        console.error(`  ❌ ${task.task_id} ${task.name} - 发送失败: ${err.message}`);
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker());
+  await Promise.all(workers);
+
+  console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 跳过${skipCount}条, 无需发送${targets.length}条`);
   return { sent: sentCount, skipped: skipCount, overdue: overdueCount };
 }
 

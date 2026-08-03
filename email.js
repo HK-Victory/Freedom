@@ -4,22 +4,45 @@ const { db, getEmailConfig } = require('./db');
 // 任务详情链接前缀：生产环境通过 APP_URL 环境变量配置（如 https://xxx.vercel.app）
 const APP_URL = (process.env.APP_URL || 'https://your-vercel-app.vercel.app').replace(/\/$/, '');
 
-let transporter = null;
+let _transporter = null;
+let _transporterKey = '';
 
+// 复用 transporter：避免每封邮件都重建连接；并设连接/握手/套接字超时，
+// 让 SMTP 慢或不可达时快速失败，而不是卡到 nodemailer 默认的 30~120 秒。
 function getTransporter() {
   const cfg = getEmailConfig();
   if (!cfg.smtp_host || !cfg.smtp_user) return null;
 
-  transporter = nodemailer.createTransport({
+  const key = `${cfg.smtp_host}|${cfg.smtp_port}|${cfg.smtp_secure}|${cfg.smtp_user}`;
+  if (_transporter && _transporterKey === key) return _transporter;
+
+  _transporter = nodemailer.createTransport({
     host: cfg.smtp_host,
     port: cfg.smtp_port || 465,
     secure: cfg.smtp_secure === 1,
     auth: {
       user: cfg.smtp_user,
       pass: cfg.smtp_pass
-    }
+    },
+    connectionTimeout: 10000,   // 建立连接最多 10s
+    greetingTimeout: 10000,    // SMTP 握手最多 10s
+    socketTimeout: 20000       // 读写套接字最多 20s
   });
-  return transporter;
+  _transporterKey = key;
+  return _transporter;
+}
+
+// 单封邮件发送加硬超时：即使 transporter 层超时未触发，也保证一封卡住不会拖垮整批。
+async function sendMailWithTimeout(transporter, mailOptions, ms = 12000) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`SMTP发送超时（${ms}ms）`)), ms);
+  });
+  try {
+    return await Promise.race([transporter.sendMail(mailOptions), timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function sendTestEmail(to) {
@@ -28,7 +51,7 @@ async function sendTestEmail(to) {
     throw new Error('SMTP配置不完整，请先填写SMTP服务器信息');
   }
   const t = getTransporter();
-  const info = await t.sendMail({
+  const info = await sendMailWithTimeout(t, {
     from: `"${cfg.sender_name}" <${cfg.smtp_user}>`,
     to,
     subject: '【闻道任务提醒】测试邮件',
@@ -120,7 +143,7 @@ async function sendTaskReminder(task, daysBefore) {
     <p style="text-align: center; color: #9ca3af; font-size: 11px; margin-top: 16px;">闻道包装设计工作室任务跟踪系统 · 自动发送</p>
   </div>`;
 
-  const info = await t.sendMail({
+  const info = await sendMailWithTimeout(t, {
     from: `"${cfg.sender_name}" <${cfg.smtp_user}>`,
     to: toList,
     subject,
