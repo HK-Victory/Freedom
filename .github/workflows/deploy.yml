@@ -4,13 +4,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'   # 每小时触发一次；实际发送小时由「提醒设置」页面的 hour 控制（北京时间）
 
 jobs:
   deploy:
-    # 仅在 push / 手动触发时部署，避免定时任务（每小时）也触发重新部署
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -60,20 +56,3 @@ jobs:
 
           # shellcheck disable=SC2086
           npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN" $EXTRA_ENV
-
-  remind:
-    # 定时提醒：每小时调用线上 /api/cron/reminders，由「提醒设置」页面的 hour 控制具体发送时刻
-    # 需在仓库 Secrets 配置 REMINDER_URL（部署成功后的 Vercel 地址）与 CRON_SECRET
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger daily task reminders
-        env:
-          REMINDER_URL: ${{ secrets.REMINDER_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
-        run: |
-          if [ -z "$REMINDER_URL" ]; then
-            echo "REMINDER_URL 未配置，跳过每日提醒。"
-            exit 0
-          fi
-          curl -fsS -X GET "$REMINDER_URL/api/cron/reminders?secret=$CRON_SECRET"
