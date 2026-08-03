@@ -12,7 +12,7 @@
           <p class="page-subtitle">{{ task.task_id }} · {{ task.category }}</p>
         </div>
         <div class="flex gap-8">
-          <button class="btn btn-secondary" @click="showEdit = true">✏️ 编辑</button>
+          <button class="btn btn-secondary" @click="openEdit">✏️ 编辑</button>
           <button class="btn btn-danger" @click="handleDelete">🗑️ 删除</button>
         </div>
       </div>
@@ -245,6 +245,23 @@ const updateProgress = async () => {
     progressForm.value = { progress: 0, note: '' }
     loadTask()
   } catch (err) {}
+}
+
+// 打开编辑框时，用当前任务数据预填表单。否则 editForm 为空对象，
+// v-model 会把未填写的字段变成空字符串发出去，后端 COALESCE('', field) 会把这些字段清空。
+const openEdit = () => {
+  const t = task.value || {}
+  editForm.value = {
+    name: t.name || '',
+    category: t.category || '',
+    priority: t.priority || '中',
+    start_date: t.start_date || '',
+    end_date: t.end_date || '',
+    owner: t.owner || '',
+    status: t.status || 'pending',
+    requirements: t.requirements || ''
+  }
+  showEdit.value = true
 }
 
 const saveEdit = async () => {

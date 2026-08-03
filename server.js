@@ -15,16 +15,17 @@ const PORT = 3000;
 app.use(express.json({ limit: '10mb' }));
 
 // 写操作（增删改）在返回响应前先 await 落盘，确保部署/重启不丢数据。
-// 只读请求（GET）不触发，避免无谓的网络写入延迟。
-// 落盘失败时，把具体原因注入响应体的 persistWarning，避免「保存成功但刷新丢数据」的假象。
-// 该机制统一覆盖所有写接口（SMTP 配置 / 收件人 / 提醒设置 / 用户 / 任务 等），无需逐个处理。
+// 读取与写入请求都在处理前从 Blob 拉取最新快照并对账。
+// 根因修复：Vercel serverless 多实例各自持有独立内存 sql.js 数据库；若不先对齐，
+// 刷新页面（GET）可能打到「温实例」的陈旧内存库，从而显示被回退的旧状态
+// （现象即「编辑一个任务，刷新后其它任务状态变回待开始」）。
+// reconcileFromBlob 仅「读取」Blob，不会写入，因此对 GET 安全。
+// 仅对 /api/ 请求做对账；静态资源与 SPA 路由无需读 Blob，避免无谓开销。
 app.use((req, res, next) => {
-  if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return next();
-  // 写前先从 Blob 拉取最新快照并据其对账，避免多实例各自持有旧内存库、后写覆盖丢失他人改动
-  // （这正是「编辑完状态、重部署/再次写入后消失」的根因之一）。
+  if (!req.path.startsWith('/api/')) return next();
   Promise.resolve()
     .then(() => reconcileFromBlob())
-    .catch((e) => console.error('[reconcile] 写前对账失败（忽略）:', e && e.message))
+    .catch((e) => console.error('[reconcile] 请求前对账失败（忽略，沿用本地内存库）:', e && e.message))
     .finally(() => next());
 });
 

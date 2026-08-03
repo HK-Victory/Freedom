@@ -336,14 +336,20 @@ async function reconcileFromBlob() {
   try {
     const { blobs } = await list({ token: BLOB_TOKEN, prefix: BLOB_KEY, limit: 1 });
     if (!blobs || !blobs.length) return;
-    const ua = blobs[0].uploadedAt ? new Date(blobs[0].uploadedAt).getTime() : 0;
-    if (ua <= _lastLoadedAt) return; // 本地已是最新，无需对账
+    // 关键修复：不再用 uploadedAt 判断是否「已最新」后跳过。
+    // 实测 Vercel Blob 覆盖写入（allowOverwrite）后 uploadedAt 往往保持不变，
+    // 导致各实例误以为本地内存库「已最新」而永不重新拉取，于是各自在陈旧内存上改、
+    // 再把整库快照（含其它任务被回退成的旧状态）写回，表现为「改一个任务、其它任务状态被冲掉」。
+    // 改为：写请求处理前始终拉取 Blob 最新快照并替换本地库，确保本次改动叠加在最新状态之上。
     const buf = await fetchBlobBytes(blobs[0]);
     if (buf && buf.length) {
       _db = new SQL.Database(buf);
       _db.run(SCHEMA);
+      const ua = blobs[0].uploadedAt ? new Date(blobs[0].uploadedAt).getTime() : 0;
       _lastLoadedAt = ua;
       console.log('[reconcile] 已从 Blob 同步最新快照，避免覆盖他人改动');
+    } else {
+      console.warn('[reconcile] Blob 快照为空/读取失败，沿用本地内存库（本次改动仍会落盘，可能短暂落后）');
     }
   } catch (e) {
     console.error('[reconcile] 对账失败（忽略，沿用本地内存库）:', e && e.message);
