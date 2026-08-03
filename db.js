@@ -590,8 +590,8 @@ function setSetting(key, value) {
 
 function getReminderSettings() {
   const enabled = getSetting('reminder_enabled', '0') === '1';
-  let hour = parseInt(getSetting('reminder_hour', '9'), 10);
-  if (isNaN(hour) || hour < 0 || hour > 23) hour = 9;
+  let hour = parseInt(getSetting('reminder_hour', '20'), 10);
+  if (isNaN(hour) || hour < 0 || hour > 23) hour = 20;
   let minute = parseInt(getSetting('reminder_minute', '0'), 10);
   if (isNaN(minute) || minute < 0 || minute > 59) minute = 0;
   let leadDays;
@@ -605,7 +605,7 @@ function getReminderSettings() {
 function setReminderSettings(s) {
   if (!s || typeof s !== 'object') return;
   setSetting('reminder_enabled', s.enabled ? '1' : '0');
-  setSetting('reminder_hour', String(Number.isFinite(s.hour) ? s.hour : 9));
+  setSetting('reminder_hour', String(Number.isFinite(s.hour) ? s.hour : 20));
   setSetting('reminder_minute', String(Number.isFinite(s.minute) ? s.minute : 0));
   const days = Array.isArray(s.leadDays) && s.leadDays.length
     ? s.leadDays.map(Number).filter(n => Number.isFinite(n) && n >= 0)

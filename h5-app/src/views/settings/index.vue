@@ -247,7 +247,7 @@ const pwdForm = ref({ old_password: '', new_password: '' })
 const pwdMsg = ref('')
 
 // 定时提醒设置
-const reminder = ref({ enabled: 0, hour: 9, leadDays: [1, 3, 7] })
+const reminder = ref({ enabled: 0, hour: 20, leadDays: [1, 3, 7] })
 const reminderMsg = ref('')
 const triggering = ref(false)
 const leadDayOptions = [1, 2, 3, 5, 7]
@@ -359,7 +359,7 @@ const loadReminder = async () => {
     const d = await request.get('/settings/reminder')
     reminder.value = {
       enabled: d.enabled ? 1 : 0,
-      hour: d.hour ?? 9,
+      hour: d.hour ?? 20,
       leadDays: Array.isArray(d.leadDays) && d.leadDays.length ? d.leadDays : [1, 3, 7]
     }
   } catch (err) {}
