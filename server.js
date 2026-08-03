@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, flush, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, flush, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -16,6 +16,8 @@ app.use(express.json({ limit: '10mb' }));
 
 // 写操作（增删改）在返回响应前先 await 落盘，确保部署/重启不丢数据。
 // 只读请求（GET）不触发，避免无谓的网络写入延迟。
+// 落盘失败时，把具体原因注入响应体的 persistWarning，避免「保存成功但刷新丢数据」的假象。
+// 该机制统一覆盖所有写接口（SMTP 配置 / 收件人 / 提醒设置 / 用户 / 任务 等），无需逐个处理。
 app.use((req, res, next) => {
   if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return next();
   const origJson = res.json.bind(res);
@@ -23,14 +25,26 @@ app.use((req, res, next) => {
   res.json = function (body) {
     Promise.resolve()
       .then(() => flush())
-      .catch((e) => console.error('[flush] 落盘失败:', e.message))
-      .finally(() => origJson.call(this, body));
+      .then(() => {
+        const ls = getLastSave();
+        if (ls.configured && ls.ok === false && body && typeof body === 'object' && !Array.isArray(body)) {
+          body = { ...body, persistWarning: ls.error || '数据未持久化到 Blob，重新部署将丢失' };
+        }
+        origJson.call(this, body);
+      })
+      .catch((e) => {
+        console.error('[flush] 落盘异常:', e && e.message);
+        if (body && typeof body === 'object' && !Array.isArray(body)) {
+          body = { ...body, persistWarning: '数据持久化异常: ' + (e && e.message) };
+        }
+        origJson.call(this, body);
+      });
     return res;
   };
   res.send = function (body) {
     Promise.resolve()
       .then(() => flush())
-      .catch((e) => console.error('[flush] 落盘失败:', e.message))
+      .catch((e) => console.error('[flush] 落盘异常:', e && e.message))
       .finally(() => origSend.call(this, body));
     return res;
   };

@@ -231,7 +231,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
 
@@ -299,6 +299,7 @@ const saveConfig = async () => {
     await request.post('/email/config', config.value)
     saveMsg.value = '配置已保存'
     setTimeout(() => saveMsg.value = '', 3000)
+    await checkPersist()
   } catch (err) {
     saveMsg.value = '保存失败'
   }
@@ -430,11 +431,19 @@ const saveStorage = async () => {
   }
 }
 
+// 全局持久化告警（由 request 拦截器在任意写接口落盘失败时广播）
+const onPersistWarning = (e) => { persistWarn.value = e.detail }
+
 onMounted(() => {
   loadConfig()
   loadRecipients()
   loadReminder()
   loadStorageStatus()
+  window.addEventListener('app:persist-warning', onPersistWarning)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('app:persist-warning', onPersistWarning)
 })
 </script>
 

@@ -19,7 +19,13 @@ request.interceptors.request.use(config => {
 })
 
 request.interceptors.response.use(
-  res => res.data,
+  res => {
+    // 后端在写接口落盘失败时会在响应体注入 persistWarning；统一广播给全局告警组件
+    if (res.data && res.data.persistWarning) {
+      window.dispatchEvent(new CustomEvent('app:persist-warning', { detail: res.data.persistWarning }))
+    }
+    return res.data
+  },
   err => {
     if (err.response?.status === 401) {
       localStorage.removeItem('token')

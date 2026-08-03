@@ -617,9 +617,20 @@ async function getStorageStatus() {
   };
 }
 
+// 最近一次落盘结果（供写接口在响应中注入 persistWarning，统一暴露持久化失败）
+function getLastSave() {
+  return {
+    configured: !!BLOB_TOKEN,
+    ok: _lastSaveOk,
+    error: _lastSaveError,
+    at: _lastSaveAt ? new Date(_lastSaveAt).toISOString() : null
+  };
+}
+
 module.exports = {
   db,
   getEmailConfig,
+  getLastSave,
   upsertEmailConfig,
   getSetting,
   setSetting,
