@@ -1,0 +1,26 @@
+name: 定时提醒 (Reminders)
+
+# 独立的定时提醒工作流，与部署流程（deploy.yml）完全解耦：
+# - 仅负责每小时调用线上 /api/cron/reminders，不会触发重新部署
+# - 实际是否发邮件由「提醒设置」页面的 hour（北京时间）决定，非目标小时接口会自动跳过
+on:
+  schedule:
+    - cron: '0 * * * *'   # 每小时（UTC）。北京时间 = UTC+8，故等价于每小时（北京时间）触发一次；接口内按配置小时门控
+  workflow_dispatch:      # 支持在 Actions 页面手动触发，便于测试
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger task reminders
+        env:
+          REMINDER_URL: ${{ secrets.REMINDER_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$REMINDER_URL" ]; then
+            echo "::error::REMINDER_URL 未配置。请在仓库 Settings > Secrets and variables > Actions 中添加名为 REMINDER_URL 的密钥（值为部署后的 Vercel 站点地址，例如 https://freedom.vercel.app，注意不要带结尾斜杠）"
+            exit 1
+          fi
+          echo "调用 $REMINDER_URL/api/cron/reminders ..."
+          RESP=$(curl -fsS -X GET "$REMINDER_URL/api/cron/reminders?secret=$CRON_SECRET")
+          echo "响应: $RESP"

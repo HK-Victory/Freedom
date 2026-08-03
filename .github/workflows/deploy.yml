@@ -41,6 +41,9 @@ jobs:
           # 同时兼容「Secrets」与「Variables」两种配置位置（优先 Secrets）。
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN || vars.BLOB_READ_WRITE_TOKEN }}
           BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID || vars.BLOB_STORE_ID }}
+          # 定时提醒鉴权密钥：注入 Vercel 运行时后，/api/cron/reminders 才会真正校验 secret，
+          # 否则该接口对任何人开放（仅靠 URL 不可预测性防调用）。
+          CRON_SECRET: ${{ secrets.CRON_SECRET || vars.CRON_SECRET }}
         run: |
           # Vercel 项目名必须全小写，不能依赖仓库目录名（如 Freedom 大写会 400 失败）
           PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
@@ -52,6 +55,9 @@ jobs:
           fi
           if [ -n "$BLOB_STORE_ID" ]; then
             EXTRA_ENV="$EXTRA_ENV -e BLOB_STORE_ID=$BLOB_STORE_ID"
+          fi
+          if [ -n "$CRON_SECRET" ]; then
+            EXTRA_ENV="$EXTRA_ENV -e CRON_SECRET=$CRON_SECRET"
           fi
 
           # shellcheck disable=SC2086
