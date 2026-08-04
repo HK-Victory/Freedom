@@ -5,6 +5,21 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# =============================================================
+# 部署配置项（集中读取自 GitHub Actions 的 Secrets / Variables）
+# 配置入口：仓库 Settings → Secrets and variables → Actions
+#   • Secrets 标签页：存放含密码的敏感项（VERCEL_TOKEN / SUPABASE_DB_URL / CRON_SECRET）
+#   • Variables 标签页：存放非敏感项（VERCEL_PROJECT_NAME / APP_URL）
+# 约定：含密码的项优先读 Secrets，找不到再回退到 Variables；非敏感项直接读 Variables。
+# 下方 env 仅做「取值」，真正的注入在 Deploy 步骤用 `vercel deploy -e` 完成。
+# =============================================================
+env:
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_PROJECT_NAME: ${{ vars.VERCEL_PROJECT_NAME || 'freedom' }}
+  SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL || vars.SUPABASE_DB_URL }}
+  APP_URL: ${{ vars.APP_URL }}
+  CRON_SECRET: ${{ secrets.CRON_SECRET || vars.CRON_SECRET }}
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -18,11 +33,9 @@ jobs:
           node-version: 20
 
       - name: Verify Vercel token
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           if [ -z "$VERCEL_TOKEN" ]; then
-            echo "::error::VERCEL_TOKEN 未配置。请在仓库 Settings > Secrets and variables > Actions 中添加名为 VERCEL_TOKEN 的密钥（值来自 https://vercel.com/account/tokens）"
+            echo "::error::VERCEL_TOKEN 未配置。请在仓库 Settings → Secrets and variables → Actions → Secrets 中添加名为 VERCEL_TOKEN 的密钥（值来自 https://vercel.com/account/tokens）"
             exit 1
           fi
           echo "Token 已存在，校验身份..."
@@ -31,25 +44,28 @@ jobs:
             exit 1
           }
 
+      - name: 校验 Supabase 部署配置
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::warning::SUPABASE_DB_URL 未配置，应用可启动但所有写操作会失败（前端『设置 → 数据存储状态』显示『连接串缺失』）。请到 Secrets/Variables 添加 SUPABASE_DB_URL，格式见 SUPABASE_SETUP.md。"
+          else
+            echo "SUPABASE_DB_URL 已配置，将注入 Vercel 运行时。"
+          fi
+
+          if [ -z "$APP_URL" ]; then
+            echo "::warning::APP_URL 未配置，邮件提醒中的链接将使用占位域名 https://your-vercel-app.vercel.app。如需正确跳转，请在 Variables 添加 APP_URL（部署后的正式域名，如 https://freedom.vercel.app）。"
+          fi
+
       - name: Deploy to Vercel (Production)
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_PROJECT_NAME: ${{ secrets.VERCEL_PROJECT_NAME }}
-          # Supabase Postgres 连接串：从仓库 Secrets 或 Variables 读取，部署时注入 Vercel 运行时。
-          # db.js 通过 process.env.SUPABASE_DB_URL 直连 Supabase 的 Postgres 数据库（数据真实存放在 Supabase）。
-          # 在 Supabase 控制台 Settings → Database → Connection string 复制「URI」格式，
-          # 形如 postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
-          # 同时兼容「Secrets」与「Variables」两种配置位置（优先 Secrets）。
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL || vars.SUPABASE_DB_URL }}
         run: |
           # Vercel 项目名必须全小写，不能依赖仓库目录名（如 Freedom 大写会 400 失败）
           PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
 
-          # 将 Supabase 连接串注入 Vercel 运行时环境变量（仅非空时注入，避免覆盖/清空已手动配置的值）
+          # 将部署配置注入 Vercel 运行时环境变量（仅非空时注入，避免覆盖/清空已手动配置的值）
           EXTRA_ENV=""
-          if [ -n "$SUPABASE_DB_URL" ]; then
-            EXTRA_ENV="$EXTRA_ENV -e SUPABASE_DB_URL=$SUPABASE_DB_URL"
-          fi
+          [ -n "$SUPABASE_DB_URL" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_DB_URL=$SUPABASE_DB_URL"
+          [ -n "$APP_URL" ] && EXTRA_ENV="$EXTRA_ENV -e APP_URL=$APP_URL"
+          [ -n "$CRON_SECRET" ] && EXTRA_ENV="$EXTRA_ENV -e CRON_SECRET=$CRON_SECRET"
 
           # shellcheck disable=SC2086
           npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN" $EXTRA_ENV

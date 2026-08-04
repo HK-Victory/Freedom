@@ -9,11 +9,12 @@
  *   （CLI 报 500 是因为那时数据库初始化就失败了；初始化修好后请求卡在 serverless-http）。
  *
  * 初始化：
- *   sql.js / 数据库初始化做成幂等单例（ensureReady），在首个请求前 await 完成，
- *   之后请求直接复用，避免每次冷启动重复加载 wasm。
+ *   Supabase Postgres 连接池初始化做成幂等单例（ensureReady），在首个请求前 await 完成，
+ *   之后请求直接复用同一个连接池，避免每次冷启动重复建连。
  */
-// Vercel 免费(Hobby)老项目函数默认超时仅 10s，冷启动加载 wasm + 拉取/回写 Blob 易超时。
-// 已在 vercel.json 给本函数配置 maxDuration:60，这里把自保超时对齐到 55s，避免“自己先 503”。
+// Vercel 免费(Hobby)老项目函数默认超时仅 10s，而首次请求需完成 Supabase 连接池建连 +
+// 11 张表 CREATE TABLE IF NOT EXISTS + 默认超管创建，可能偏慢。已在 vercel.json 给本函数
+// 配置 maxDuration:60，这里把自保超时对齐到 55s，避免“自己先 503”。
 process.on('unhandledRejection', (reason) => console.error('[api] unhandledRejection:', reason));
 process.on('uncaughtException', (e) => console.error('[api] uncaughtException:', e && (e.stack || e.message)));
 

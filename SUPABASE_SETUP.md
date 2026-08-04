@@ -130,3 +130,37 @@ npm test
 | 故障表现 | 静默回退种子/互相覆盖 | 连接失败直接 500，前端可见报错 |
 
 存储状态可在 **设置 → 数据存储状态** 中实时查看（连接串是否配置、是否连通、最近写入结果、各表行数）。
+
+## 八、GitHub Actions 部署变量清单
+
+部署工作流 `.github/workflows/deploy.yml` 在 push 到 `main` 时自动构建并部署到 Vercel。
+所有部署配置集中读取自 **GitHub Actions 的 Secrets / Variables**，仓库内不硬编码任何凭据。
+
+**配置入口**：仓库 **Settings → Secrets and variables → Actions**
+
+| 名称 | 存放位置 | 是否必需 | 说明 |
+| --- | --- | --- | --- |
+| `VERCEL_TOKEN` | Secrets | 必需 | Vercel 部署令牌（https://vercel.com/account/tokens） |
+| `SUPABASE_DB_URL` | Secrets 或 Variables | **必需（数据持久化）** | Supabase Postgres 连接串（URI 格式，见下） |
+| `VERCEL_PROJECT_NAME` | Variables | 可选（默认 `freedom`） | Vercel 项目名，**必须全小写** |
+| `APP_URL` | Variables | 推荐 | 部署后的正式域名，用于邮件提醒链接（如 `https://freedom.vercel.app`） |
+| `CRON_SECRET` | Secrets 或 Variables | 可选 | 仅当重新启用 `/api/cron/*` 定时提醒时需要，用于校验调用方 |
+
+> 含密码的项（`VERCEL_TOKEN` / `SUPABASE_DB_URL` / `CRON_SECRET`）建议放 **Secrets** 标签页；
+> 工作流对这类项采用 `secrets.X || vars.X` 读取，因此放 Variables 也能生效。
+> 非敏感项（`VERCEL_PROJECT_NAME` / `APP_URL`）放 **Variables** 标签页即可。
+>
+> 工作流对这些变量采用「非空才注入」策略：未配置时部署仍会成功（应用可启动），
+> 但缺少 `SUPABASE_DB_URL` 时写操作会报「连接串缺失」、数据不持久。
+
+### SUPABASE_DB_URL 格式
+
+在 Supabase 控制台 **Settings → Database → Connection string** 复制「URI」格式，形如：
+
+```
+postgresql://postgres:<你的密码>@db.<project-ref>.supabase.co:5432/postgres
+```
+
+- 默认直连端口 `5432`；`db.js` 用 `pg` 驱动直连，并启用 `ssl: { rejectUnauthorized: false }`（Supabase 要求 SSL）。
+- 项目同时兼容 `DATABASE_URL` 别名（代码 `SUPABASE_DB_URL || DATABASE_URL`）。
+- 未配置时服务可启动，但写操作报「连接串缺失」、数据不持久（前端「设置 → 数据存储状态」可见）。
