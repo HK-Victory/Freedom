@@ -155,12 +155,29 @@ npm test
 
 ### SUPABASE_DB_URL 格式
 
-在 Supabase 控制台 **Settings → Database → Connection string** 复制「URI」格式，形如：
+在 Supabase 控制台 **Settings → Database → Connection string** 复制连接串。该页面有两个标签页：
+
+**① Connection pooling（连接池 / PgBouncer）— 推荐用于 Vercel 等外部/Serverless 平台：**
+
+```
+postgresql://postgres.<project-ref>:<你的密码>@aws-0-<region>.pooler.supabase.com:6543/postgres
+```
+
+- 主机为 `*.pooler.supabase.com`、端口 `6543`、用户名带项目引用（`postgres.<project-ref>`）。
+- 该主机**有公网 DNS 解析**，外部平台可直连。
+- `db.js` 检测到 `pooler.supabase.com` 主机会自动追加 `?pgbouncer=true`，避免 PgBouncer 事务模式下 `pg` 预编译语句报错，无需手动处理。
+
+**② Direct connection（直连，端口 5432）：**
 
 ```
 postgresql://postgres:<你的密码>@db.<project-ref>.supabase.co:5432/postgres
 ```
 
-- 默认直连端口 `5432`；`db.js` 用 `pg` 驱动直连，并启用 `ssl: { rejectUnauthorized: false }`（Supabase 要求 SSL）。
+- ⚠️ **注意**：部分 Supabase 项目的直连主机 `db.<project-ref>.supabase.co` **没有公网 DNS 解析**，从 Vercel 等外部网络会报 `getaddrinfo ENOTFOUND`。若遇此错误，请改用上面的 **Connection pooling** 字符串。
+- 本项目实测即为此情况，已切换为 pooler 字符串。
+
+通用说明：
+
+- `db.js` 用 `pg` 驱动直连，并启用 `ssl: { rejectUnauthorized: false }`（Supabase 要求 SSL）。
 - 项目同时兼容 `DATABASE_URL` 别名（代码 `SUPABASE_DB_URL || DATABASE_URL`）。
 - 未配置时服务可启动，但写操作报「连接串缺失」、数据不持久（前端「设置 → 数据存储状态」可见）。

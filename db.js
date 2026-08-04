@@ -33,14 +33,28 @@ if (pg.types && typeof pg.types.setTypeParser === 'function') {
 const CONNECTION_STRING = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || '';
 const POOL_CONFIGURED = !!CONNECTION_STRING;
 
+// Supabase 连接池（PgBouncer，主机含 pooler.supabase.com，端口 6543）默认事务模式，
+// 与 pg 驱动的预编译语句（extended query protocol）不兼容，会产生
+// "prepared statement \"sN\" does not exist" 等错误。追加 pgbouncer=true 让 PgBouncer
+// 正确处理预编译语句。直连（db.*.supabase.co:5432）无需此参数。
+function buildConnectionString(raw) {
+  if (/pooler\.supabase\.com/i.test(raw) && !/[?&]pgbouncer=true/i.test(raw)) {
+    const sep = raw.includes('?') ? '&' : '?';
+    return raw + sep + 'pgbouncer=true';
+  }
+  return raw;
+}
+
 let pool = null;
 function getPool() {
   if (!pool) {
     if (!CONNECTION_STRING) {
-      throw new Error('SUPABASE_DB_URL 未配置：数据无法持久化。请在 Vercel 环境变量中配置 Supabase Postgres 连接串（Settings → Database → Connection string，直连 5432）。');
+      throw new Error('SUPABASE_DB_URL 未配置：数据无法持久化。请在 Vercel / GitHub Actions 变量中配置 Supabase Postgres 连接串。' +
+        '若直连主机(db.*.supabase.co)报 ENOTFOUND 无法解析，请改用控制台 Settings → Database → Connection string 里「Connection pooling」标签页的 pooler 字符串(*.pooler.supabase.com:6543)。');
     }
+    const cs = buildConnectionString(CONNECTION_STRING);
     pool = new Pool({
-      connectionString: CONNECTION_STRING,
+      connectionString: cs,
       ssl: { rejectUnauthorized: false }, // Supabase 要求 SSL
       max: 5,
       idleTimeoutMillis: 30000,
