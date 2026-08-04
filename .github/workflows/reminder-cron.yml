@@ -1,0 +1,60 @@
+name: 定时提醒 (Task Reminder Cron)
+
+# 说明：Vercel serverless 没有常驻进程，无法用 node-cron 在站内定时跑。
+# 因此「定时提醒」改用 GitHub Actions 定时工作流，每隔一小时请求一次线上
+# /api/cron/reminders 端点；该端点内部再做「北京时间 hour 是否等于页面配置的发送小时」
+# 的二次校验，只有命中才真正发送，避免每小时都发。
+#
+# 鉴权：端点要求 CRON_SECRET 一致（若已在仓库 Secrets/Variables 配置）。
+# 配置入口：仓库 Settings → Secrets and variables → Actions
+#   • Secrets:  CRON_SECRET（可选，未配置则端点不校验，任何人可调用，建议配置）
+#   • Variables: APP_URL（部署后的正式域名，如 https://freedom-ten-phi.vercel.app；
+#               未配置则回退到下方默认值）
+
+on:
+  schedule:
+    # 每小时第 0 分钟触发一次（北京时间 = UTC+8，因此会覆盖 0~23 点每个整点）。
+    # 端点自身按「配置的发送小时」放行，所以这里只需保证足够密的覆盖即可。
+    - cron: '0 * * * *'
+  # 允许在 Actions 页面手动点一次立即验证
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-reminder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_URL: ${{ vars.APP_URL || 'https://freedom-ten-phi.vercel.app' }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET || '' }}
+    steps:
+      - name: 触发 /api/cron/reminders
+        run: |
+          URL="${APP_URL}/api/cron/reminders"
+          if [ -n "$CRON_SECRET" ]; then
+            URL="${URL}?secret=${CRON_SECRET}"
+          else
+            echo "::warning::CRON_SECRET 未配置，端点将不校验身份（建议到仓库 Secrets 添加 CRON_SECRET）。"
+          fi
+
+          echo "调用: $URL"
+          # 最多重试 3 次，间隔 20s，规避 GitHub Actions 调度偶尔的抖动 / 瞬时网络失败
+          for i in 1 2 3; do
+            echo "--- 第 $i 次尝试 ---"
+            HTTP_CODE=$(curl -sS -o /tmp/resp.json -w '%{http_code}' --max-time 60 "$URL")
+            BODY=$(cat /tmp/resp.json 2>/dev/null)
+            echo "HTTP $HTTP_CODE"
+            echo "响应: $BODY"
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "::notice::定时提醒端点调用成功"
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              echo "非 200，20s 后重试..."
+              sleep 20
+            fi
+          done
+          echo "::error::定时提醒端点调用失败（连续 3 次非 200）"
+          exit 1
