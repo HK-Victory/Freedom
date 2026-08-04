@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady, storageFailure } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -17,6 +17,16 @@ app.use(express.json({ limit: '10mb' }));
 // 异步路由错误兜底：Express 4 不会自动 catch async 抛错，统一转发到错误处理器。
 // 注意：错误处理中间件必须注册在「所有路由之后」才会生效（见文件末尾），此处仅定义包装器。
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// 存储不可用时的统一拦截：直接给出「为什么连不上数据库」，
+// 而不是让业务代码抛出 sql.js 的 wasm ENOENT 这类误导性底层错误。
+// /api/health 是诊断入口，必须放行。
+app.use((req, res, next) => {
+  if (req.path === '/api/health') return next();
+  const reason = storageFailure();
+  if (reason) return res.status(503).json({ error: reason });
+  next();
+});
 
 // 文件上传配置
 // 重要：Vercel serverless 的代码目录 (/var/task) 是只读的，不能在代码目录下建 uploads 目录，
@@ -51,22 +61,38 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   });
 }));
 
-// 公开健康检查：仅暴露 Postgres 连通性，不含任何业务数据（便于部署后一行命令自验）
-app.get('/api/health', asyncHandler(async (req, res) => {
-  let connected = false;
-  let urlConfigured = false;
+// 公开健康检查：只暴露连通性与失败原因，不含任何业务数据（便于部署后一行命令自验）。
+// 该接口必须【永不 500】，否则存储挂掉时反而无法定位根因。
+// 注意：旧版这里读的是 s.postgres.*，而 getStorageStatus() 早已改为返回 supabase/sqlite，
+// 属性不存在会抛错被吞掉，导致永远显示未连接 —— 已修正。
+app.get('/api/health', async (req, res) => {
+  let storage = null;
+  let statusError = null;
   try {
-    const s = await getStorageStatus();
-    connected = s.postgres.connected;
-    urlConfigured = s.postgres.urlConfigured;
-  } catch (e) { /* 忽略，默认 connected=false */ }
+    storage = await getStorageStatus();
+  } catch (e) {
+    statusError = (e && e.message) || String(e);
+  }
   res.json({
     ok: true,
     service: 'freedom',
-    postgres: { urlConfigured, connected },
+    driver: storage ? storage.driver : null,
+    supabase: storage ? {
+      urlConfigured: storage.supabase.urlConfigured,
+      keyConfigured: storage.supabase.keyConfigured,
+      connected: storage.supabase.connected,
+      connectError: storage.supabase.connectError
+    } : null,
+    sqlite: storage ? {
+      active: storage.sqlite.active,
+      engine: storage.sqlite.engine,
+      initError: storage.sqlite.initError
+    } : null,
+    storageError: storageFailure(),
+    statusError,
     time: new Date().toISOString()
   });
-}));
+});
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });

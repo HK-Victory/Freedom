@@ -25,6 +25,7 @@ const { createClient } = require('@supabase/supabase-js');
 const initSqlJs = require('sql.js');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const fs = require('fs');
 
 // ===================== 驱动选择 =====================
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -33,6 +34,7 @@ const SUPABASE_CONFIGURED = !!(SUPABASE_URL && SUPABASE_KEY);
 
 let DRIVER = null;            // 'supabase' | 'sqlite'（init 后确定）
 let _supabaseError = null;    // supabase 连接/exec_sql 失败原因（降级时记录）
+let _sqliteError = null;      // SQLite 兜底自身也起不来的原因（如 wasm 未打包）
 
 // ===================== Supabase 客户端（懒加载）=====================
 let _sb = null;
@@ -52,9 +54,39 @@ function getSupabase() {
 // ===================== SQLite（sql.js 懒加载）=====================
 let _sqliteDb = null;
 let _sqlJsInit = null;
+let _sqliteEngine = null;   // 'wasm' | 'asm'（诊断用）
+
+/**
+ * 加载 sql.js 引擎。
+ *
+ * 坑：sql.js 默认入口 dist/sql-wasm.js 会在运行时用 __dirname 拼出 sql-wasm.wasm 再 fs 读取。
+ * 这是「动态文件依赖」，Vercel 的依赖追踪（NFT）扫不到，导致 .wasm 不会被打进函数包，
+ * 线上报 ENOENT: /var/task/node_modules/sql.js/dist/sql-wasm.wasm。
+ *
+ * 策略：先显式定位 .wasm；文件确实存在才用 wasm 版；否则回退到 dist/sql-asm.js
+ * （纯 JS 的 asm.js 构建，无任何外部二进制依赖，Serverless 下必定可用，仅稍慢）。
+ */
+function loadSqlJsEngine() {
+  try {
+    const distDir = path.dirname(require.resolve('sql.js'));   // → node_modules/sql.js/dist
+    const wasmPath = path.join(distDir, 'sql-wasm.wasm');
+    if (fs.existsSync(wasmPath)) {
+      _sqliteEngine = 'wasm';
+      return initSqlJs({ locateFile: () => wasmPath });
+    }
+    console.warn('[db] sql-wasm.wasm 未随函数包一起部署，回退 asm.js 构建:', wasmPath);
+  } catch (e) {
+    console.warn('[db] 定位 sql-wasm.wasm 失败，回退 asm.js 构建:', e && e.message);
+  }
+  // 回退：纯 JS 实现（静态 require，NFT 可追踪，必定被打包）
+  const initSqlJsAsm = require('sql.js/dist/sql-asm.js');
+  _sqliteEngine = 'asm';
+  return initSqlJsAsm();
+}
+
 async function getSqlite() {
   if (!_sqliteDb) {
-    if (!_sqlJsInit) _sqlJsInit = initSqlJs(); // Node 下自动定位 wasm
+    if (!_sqlJsInit) _sqlJsInit = loadSqlJsEngine();
     const SQL = await _sqlJsInit;
     _sqliteDb = new SQL.Database();
     _sqliteDb.run('PRAGMA foreign_keys = ON');
@@ -572,12 +604,34 @@ async function init() {
       }
     }
     // SQLite 离线/兜底
+    // 注意：这里【绝不允许抛异常】。init() 由 api/index.js 在每个请求前 await，
+    // 一旦抛出会让所有接口（含 /api/health）都变成 500，反而看不到真正的失败原因。
     DRIVER = 'sqlite';
-    await ensureSchema();
-    await initDefaultAdmin();
-    console.log('[存储] 使用本地 SQLite 兜底（数据仅进程内，Vercel 冷启动/重启不持久）');
+    try {
+      await ensureSchema();
+      await initDefaultAdmin();
+      console.log('[存储] 使用本地 SQLite 兜底（数据仅进程内，Vercel 冷启动/重启不持久）');
+    } catch (e) {
+      _sqliteError = e && e.message ? e.message : String(e);
+      console.error('[存储] ✗ SQLite 兜底也初始化失败:', _sqliteError);
+      // 不 rethrow：让 /api/health 等诊断接口仍可用，业务接口再按 storageFailure() 报清晰错误
+    }
   })();
   return _readyPromise;
+}
+
+/**
+ * 当前存储是否完全不可用；可用时返回 null，不可用时返回给用户看的清晰原因。
+ * 用于替代「sql.js wasm ENOENT」这类会误导人的底层报错。
+ */
+function storageFailure() {
+  if (!_sqliteError) return null;
+  if (SUPABASE_CONFIGURED) {
+    return '数据库不可用。Supabase 连接失败：' + (_supabaseError || '未知原因') +
+      '；SQLite 兜底同样失败：' + _sqliteError +
+      '。请确认已在 Supabase SQL Editor 执行 scripts/exec_sql.sql 创建 exec_sql 函数，并检查 SUPABASE_URL / SUPABASE_ANON_KEY 是否已注入运行时。';
+  }
+  return '数据库不可用：未配置 SUPABASE_URL / SUPABASE_ANON_KEY，且 SQLite 兜底初始化失败：' + _sqliteError;
 }
 
 function ensureReady() {
@@ -707,14 +761,21 @@ async function getStorageStatus() {
     driver,
     loadSource: driver,
     supabase: {
-      urlConfigured: SUPABASE_CONFIGURED,
+      urlConfigured: !!SUPABASE_URL,
+      keyConfigured: !!SUPABASE_KEY,
       connected: driver === 'supabase',
-      connectError: driver === 'supabase' ? _supabaseError : null,
+      // 降级后 driver 会变成 sqlite，这里必须【无条件】暴露失败原因，否则永远查不到根因
+      connectError: _supabaseError,
       lastSaveOk: _lastWriteOk,
       lastSaveError: _lastWriteError,
       lastSaveAt: _lastWriteAt ? new Date(_lastWriteAt).toISOString() : null
     },
-    sqlite: { active: driver === 'sqlite', note: driver === 'sqlite' ? '数据仅进程内，重启/Vercel 冷启动不持久' : null },
+    sqlite: {
+      active: driver === 'sqlite',
+      engine: _sqliteEngine,
+      initError: _sqliteError,
+      note: driver === 'sqlite' ? '数据仅进程内，重启/Vercel 冷启动不持久' : null
+    },
     counts
   };
 }
@@ -753,6 +814,8 @@ module.exports = {
   deleteUser,
   init,
   ensureReady,
+  // 存储彻底不可用时的清晰原因（可用时为 null）
+  storageFailure,
   // 诊断用：当前实际生效的驱动
   driver: () => DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite')
 };
