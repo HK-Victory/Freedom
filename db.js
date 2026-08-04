@@ -27,6 +27,10 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
 
+// 固定版 exec_sql 函数本体（与 scripts/exec_sql.sql 同步，供自愈重装使用）。
+// 仅在数据库里是旧版有 bug 的实现、且用（可能已坏的）exec_sql 以【空参数】重装时才用到。
+const EXEC_SQL_DEFINITION = require('./api/exec-sql-def');
+
 // ===================== 驱动选择 =====================
 // 注意 trim：从 GitHub/Vercel 面板复制粘贴极易带入首尾空白或换行，
 // 不清理会导致 createClient 抛 "Invalid URL" 或鉴权 401，且现象很难排查。
@@ -739,6 +743,30 @@ async function assertExecSqlNotStale() {
   }
 }
 
+/**
+ * 自愈：用（可能已损坏的）exec_sql 以【空参数】重新安装正确的函数本体。
+ *
+ * 为什么空参数能绕过旧版 bug：旧实现只在「参数值内部含 $数字」时把 SQL 撕碎；
+ * 这里传 params: []，函数内部没有任何字面量可注入，扫描到函数本体里的 $1/$2 时
+ * 因 lits 为空而原样保留，于是 CREATE OR REPLACE FUNCTION 被【逐字】执行，
+ * 把坏函数覆盖成修复版。函数本身是 SECURITY DEFINER（以库 owner 运行），
+ * 因此即便只配了 anon 密钥，也能借它获得建/改函数的权限。
+ *
+ * 调用方（init）在探活通过、但 exec_sql 版本探针失败时调用本函数，再重新探测；
+ * 若重装成功，则后续全部走 Supabase。失败则正常降级 SQLite（不改变既有行为）。
+ */
+let _healAttempted = false;
+async function reinstallExecSql() {
+  // 仅CREATE块（含 $$ 正文），末尾的分号由 exec_sql 的 rtrim 处理；
+  // 不在这里发 NOTIFY——函数本体被替换后立即对新调用生效，schema 缓存无需刷新。
+  const { error } = await getSupabase().rpc('exec_sql', {
+    sql: EXEC_SQL_DEFINITION,
+    params: []
+  });
+  if (error) throw new Error((error && error.message) || JSON.stringify(error));
+  _healAttempted = true;
+}
+
 let _readyPromise = null;
 async function init() {
   if (_readyPromise) return _readyPromise;
@@ -749,7 +777,24 @@ async function init() {
         const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
         if (e2) throw new Error((e2 && e2.message) || JSON.stringify(e2));
         if (!Array.isArray(d2) || d2.length === 0) throw new Error('exec_sql 返回空，连接可能异常');
-        await assertExecSqlNotStale();
+        try {
+          await assertExecSqlNotStale();
+        } catch (staleErr) {
+          // 探测到旧版有 bug 的 exec_sql：尝试用（可能已坏的）exec_sql 空参数重装正确本体自愈，
+          // 成功则继续走 Supabase；否则按原逻辑降级 SQLite。每个进程只尝试一次，避免死循环。
+          if (!_healAttempted) {
+            try {
+              await reinstallExecSql();
+              await assertExecSqlNotStale();   // 重装后必须重新探测确认
+              console.log('[存储] ✅ 已自动重装 exec_sql 函数（修复旧版 $数字 二次替换 bug），继续走 Supabase');
+            } catch (healErr) {
+              console.error('[存储] ⚠️ 自动重装 exec_sql 失败，维持降级:', (healErr && healErr.message) || healErr);
+              throw staleErr;
+            }
+          } else {
+            throw staleErr;
+          }
+        }
         DRIVER = 'supabase';
         await ensureSchema();
         // 种子导入放在建管理员之前：种子里自带 admin（密码同为 admin123）与其它用户，
