@@ -18,6 +18,11 @@
 const path = require('path');
 const Module = require('module');
 
+// 本测试自建 T001~T004 并断言精确行数，必须跑在确定性的空库上。
+// 内置种子（api/embedded-seed.js）会预置 21 个任务，task_id 与此冲突，故显式关闭。
+// 种子导入本身由 scripts/test-seed-import.js 专门覆盖。
+process.env.FREEDOM_SKIP_SEED = '1';
+
 let PGlite;
 try {
   ({ PGlite } = require('@electric-sql/pglite'));
@@ -53,7 +58,13 @@ function section(title) {
 let pglite = null;
 
 // ---------------------------------------------------------------- 在 JS 中复刻 exec_sql 的占位符替换逻辑
-// （与 scripts/exec_sql.sql 保持语义一致：按 JSON 类型构造字面量，防注入；从大到小替换 $n 避免误伤 $10）
+// 必须与 scripts/exec_sql.sql 语义严格一致，否则这份 mock 会「验证一个并不存在的数据库」。
+//
+// ⚠️ 历史教训：这里原先是「按参数倒序做全局替换」。倒序只能避免 $1 误伤 $10 这类
+// 【占位符之间】的前缀冲突，救不了【参数值内部含 $数字】的情况——而 bcrypt 哈希
+// 恰恰长成 $2b$10$...，被后续轮次当成占位符二次替换，把 SQL 撕碎。
+// 正因为 mock 与真函数同样是错的，这 132 项测试当初完全没能发现该 bug。
+// 现与真函数一致：单趟从左到右扫描 + 纯字符串拼接，已替换的内容不再参与后续匹配。
 async function execSqlJs(sql, params) {
   sql = String(sql).replace(/;\s*$/, '').trim();
   const arr = Array.isArray(params) ? params : [];
@@ -65,10 +76,18 @@ async function execSqlJs(sql, params) {
     else if (typeof v === 'number') lits.push(String(v));
     else lits.push("'" + String(v).replace(/'/g, "''") + "'");
   }
-  let converted = sql;
-  for (let i = lits.length; i >= 1; i--) {
-    converted = converted.replace(new RegExp('\\$' + i + '\\b', 'g'), lits[i - 1]);
+  let converted = '';
+  let rest = sql;
+  for (;;) {
+    const m = rest.match(/\$(\d+)/);
+    if (!m) break;
+    converted += rest.slice(0, m.index);
+    const n = parseInt(m[1], 10);
+    // 越界的 $n 原样保留（与真函数一致），不能当成占位符吞掉
+    converted += (n >= 1 && n <= lits.length) ? lits[n - 1] : m[0];
+    rest = rest.slice(m.index + m[0].length);
   }
+  converted += rest;
   const upper = converted.toUpperCase().replace(/\s+/g, ' ');
   const isReturning = /\bRETURNING\b/.test(upper);
   const res = await pglite.query(converted);

@@ -38,6 +38,11 @@ Module._load = function (request, parent, isMain) {
               return { data: null, error: { message: FAIL_MSG } };
             }
             if (/^\s*SELECT\s+1\b/i.test(sql)) return { data: [{ ok: 1 }], error: null };
+            // exec_sql 版本探针（db.js 用它识别「数据库里部署的是旧版有 bug 的函数」）。
+            // 本测试要复现的是【初始化后半程】失败，故让探针通过，把失败点保留在写 admin。
+            if (/AS\s+a\s*,\s*\$2::text\s+AS\s+b/i.test(sql)) {
+              return { data: [{ a: 'X', b: '$1' }], error: null };
+            }
             if (/^\s*(CREATE|ALTER|DROP)\b/i.test(sql)) return { data: { rowCount: 0 }, error: null };
             if (/^\s*(SELECT|WITH)\b/i.test(sql)) return { data: [], error: null };
             return { data: { rowCount: 0 }, error: null };

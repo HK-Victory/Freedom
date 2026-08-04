@@ -137,8 +137,24 @@ curl https://<你的域名>/api/health
 | `getaddrinfo ENOTFOUND db.*.supabase.co` | 仍在走已废弃的 5432 直连 | 删除 `SUPABASE_DB_URL` 变量，改用 `SUPABASE_URL` + 密钥 |
 | `syntax error at or near "admin"` | 库里是**旧版 `exec_sql`**：按参数倒序全局替换占位符，遇到 bcrypt 哈希 `$2b$10$…` 时，替换 `$1` 会误伤哈希内 `$10$` 里的 `$1`，把语句撕碎 | 重新完整执行一次 `scripts/exec_sql.sql`（新版改为单趟扫描替换） |
 | `sqlite.initError: no such table: users` | 旧版 `ensureSchema` 用单个布尔量记忆建表状态，Supabase 建表成功后再降级，SQLite 分支被跳过 | 已修复为按驱动分别记忆；升级代码即可 |
+| `Supabase 上的 exec_sql 是【旧版有 bug 的实现】…` | 启动探针主动识别出库里部署的是旧版函数（见上一条） | 按提示重新完整执行 `scripts/exec_sql.sql`。**该函数存在于数据库中，重新部署代码不会更新它** |
+| 能登录，但**任务数据一片空白** | 内置种子（`api/embedded-seed.js`）未导入 | 正常情况下首次初始化会自动导入 21 个任务等数据；若被跳过，检查是否设了 `FREEDOM_SKIP_SEED`，或 `settings` 表里已有 `seed_imported` 标记 |
 
 前端 **设置 → 数据存储状态** 也会实时展示同样的信息。
+
+## 五之二、内置种子数据
+
+`api/embedded-seed.js` 是一份 base64 编码的 SQLite 快照，含项目初始业务数据
+（21 个任务、21 份文档、12 个里程碑、10 项风险、2 个用户、1 份邮件配置）。
+
+首次初始化时会**按行读出并经统一 `db.prepare` 接口写入**，因此对 Supabase 与 SQLite 两种驱动都生效。
+
+- **幂等**：导入后在 `settings` 表写入 `seed_imported=1`，之后不再导入。
+  判定只认这个标记，**不会**因为「表是空的」就重新灌入——否则用户主动清空数据后会被自动还原，属于数据事故。
+- **已有数据的库**：若 `tasks` 非空（本功能上线前就建好的库），只补标记、不灌数据。
+- **关闭**：置环境变量 `FREEDOM_SKIP_SEED=1` 可得到纯净空库（自动化测试即用此开关）。
+- **导入时不带 `id`**，交给数据库自增。外键都走 `task_id`(TEXT) 而非数字 `id`，
+  因此丢弃 `id` 既不破坏关联，又免去 Postgres `BIGSERIAL` 序列不同步、后续插入撞主键的问题。
 
 ## 六、本地开发
 

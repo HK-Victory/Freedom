@@ -586,6 +586,113 @@ async function ensureSchema() {
   console.log('[存储] 表结构已就绪（11 张表，驱动: ' + drv + '）');
 }
 
+// =====================================================================
+//  内置种子数据
+// =====================================================================
+
+/**
+ * api/embedded-seed.js 是一份 base64 编码的 SQLite 快照，内含项目初始业务数据
+ * （21 个任务、21 份文档、12 个里程碑、10 项风险、2 个用户等）。
+ *
+ * 坑：旧版实现是「把这份快照直接当数据库文件打开」（new SQL.Database(bytes)），
+ * 所以迁移到 Supabase 原生表之后，这段加载逻辑被整体删掉了，新库空空如也——
+ * 线上表现就是「能登录，但任务数据全没了」。
+ *
+ * 这里改为「按行读出 → 经统一 db.prepare 接口写回」，从而同时适用于两种驱动：
+ *   - Supabase：首次初始化灌入，之后靠 settings 标记跳过；
+ *   - SQLite 兜底：每次冷启动都是全新空库，必须重新灌入才能看到内置数据。
+ */
+const SEED_TABLES = [
+  'tasks',              // 必须最先：documents/reminders/task_progress 外键指向 tasks(task_id)
+  'documents', 'reminders', 'task_progress', 'task_logs',
+  'milestones', 'risks', 'email_config', 'email_recipients', 'users'
+];
+
+function readSeedRows(seedDb, table) {
+  let stmt;
+  try {
+    stmt = seedDb.prepare('SELECT * FROM ' + table);
+  } catch (e) {
+    return { cols: [], rows: [] };   // 种子快照里没有这张表（后来新增的），跳过即可
+  }
+  const cols = stmt.getColumnNames();
+  const rows = [];
+  while (stmt.step()) rows.push(stmt.get());
+  stmt.free();
+  return { cols, rows };
+}
+
+async function markSeedImported() {
+  await db.prepare(
+    "INSERT INTO settings (key, value) VALUES ('seed_imported', '1') ON CONFLICT(key) DO UPDATE SET value = '1'"
+  ).run();
+}
+
+async function importEmbeddedSeed() {
+  // 显式关闭开关：自动化测试需要确定性的空库；
+  // 若部署方不想要内置演示数据，也可置 FREEDOM_SKIP_SEED=1 得到纯净库。
+  if (envStr('FREEDOM_SKIP_SEED')) return;
+
+  // 幂等只认标记，不能只看「表是不是空的」——
+  // 否则用户主动清空全部任务后，下次冷启动会被「好心」还原，属于数据事故。
+  const mark = await db.prepare("SELECT value FROM settings WHERE key = ?").get('seed_imported');
+  if (mark && mark.value) return;
+
+  // 已有业务数据的老库（本次改动之前就建好的）：只补标记，绝不灌数据
+  const cnt = await db.prepare('SELECT COUNT(*) AS c FROM tasks').get();
+  if (cnt && Number(cnt.c) > 0) { await markSeedImported(); return; }
+
+  let b64;
+  try {
+    b64 = require('./api/embedded-seed');
+  } catch (e) {
+    console.warn('[种子] 未找到 api/embedded-seed.js，跳过内置数据导入');
+    return;
+  }
+  const bytes = Buffer.from(b64, 'base64');
+  if (!bytes.length) return;
+
+  if (!_sqlJsInit) _sqlJsInit = loadSqlJsEngine();
+  const SQL = await _sqlJsInit;
+  const seedDb = new SQL.Database(bytes);
+
+  let total = 0;
+  try {
+    for (const table of SEED_TABLES) {
+      const { cols, rows } = readSeedRows(seedDb, table);
+      if (!rows.length) continue;
+
+      // email_config 主键被 CHECK (id = 1) 锁死，必须带 id；
+      // 其余表一律丢弃 id 交给数据库自增——外键都走 task_id(TEXT) 而非数字 id，
+      // 不带 id 反而免去 Postgres 的 BIGSERIAL 序列不同步、后续插入撞主键的问题。
+      const useCols = table === 'email_config' ? cols : cols.filter(c => c !== 'id');
+      const idx = useCols.map(c => cols.indexOf(c));
+
+      // 必须批量插入：Supabase 每条 SQL 都是一次 HTTPS 往返，
+      // 逐行插 60+ 行会让冷启动多花十几秒，有超时风险。
+      const CHUNK = 50;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        const tuple = '(' + useCols.map(() => '?').join(', ') + ')';
+        const sql = 'INSERT OR IGNORE INTO ' + table + ' (' + useCols.join(', ') + ') VALUES '
+                  + chunk.map(() => tuple).join(', ');
+        const values = [];
+        for (const row of chunk) for (const j of idx) values.push(row[j]);
+        try {
+          await db.prepare(sql).run(...values);
+          total += chunk.length;
+        } catch (e) {
+          console.warn('[种子] ' + table + ' 批量导入失败（已跳过该批）:', e && e.message);
+        }
+      }
+    }
+    await markSeedImported();
+    console.log('[种子] 内置数据已导入 ' + total + ' 行（驱动: ' + activeDriver() + '）');
+  } finally {
+    try { seedDb.close(); } catch (e) { /* 忽略 */ }
+  }
+}
+
 async function initDefaultAdmin() {
   const admin = await db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
   if (!admin) {
@@ -593,6 +700,42 @@ async function initDefaultAdmin() {
     await db.prepare('INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)')
       .run('admin', hash, '系统管理员', 'admin');
     console.log('[用户] 默认超管账号已创建: admin / admin123');
+  }
+}
+
+/**
+ * 探测 Supabase 上部署的 exec_sql 是不是【旧版有 bug 的实现】。
+ *
+ * 背景（真实线上事故）：旧实现按参数倒序做全局 regexp_replace 替换 $n，
+ * 一旦某个参数值内部含有 "$数字"（bcrypt 哈希 $2b$10$... 就是典型），
+ * 它会在后续轮次里被当成占位符二次替换，把 SQL 撕碎。
+ * 现象是 `syntax error at or near "admin"` —— 完全看不出「函数是旧版、需要重新执行 SQL」，
+ * 这正是上次排查耗时最久的地方。
+ *
+ * 该函数存在于数据库而非代码里，推代码不会更新它，因此必须主动探测并给出明确指引。
+ *
+ * 探针：SELECT $1, $2，参数 ['X', '$1']。
+ *   修复版（单趟从左到右扫描）→ 第二列原样返回 '$1'；
+ *   旧版          → 第二列的 '$1' 会被第 1 轮替换命中，报错或返回错值。
+ */
+async function assertExecSqlNotStale() {
+  const HINT = 'Supabase 上的 exec_sql 是【旧版有 bug 的实现】：参数值内部含 "$数字"（如 bcrypt 哈希 $2b$10$...）时会被二次替换，'
+             + '导致 SQL 被撕碎、报出 syntax error at or near "..." 之类的怪错。'
+             + '请在 Supabase 控制台 SQL Editor 【重新完整执行一次】 scripts/exec_sql.sql（含末尾的 NOTIFY pgrst）。'
+             + '注意该函数存在于数据库中，重新部署代码不会更新它。';
+  let rows;
+  try {
+    const { data, error } = await getSupabase().rpc('exec_sql', {
+      sql: 'SELECT $1::text AS a, $2::text AS b', params: ['X', '$1']
+    });
+    if (error) throw new Error((error && error.message) || JSON.stringify(error));
+    rows = data;
+  } catch (e) {
+    throw new Error(HINT + '（探测时的原始报错：' + (e && e.message ? e.message : String(e)) + '）');
+  }
+  const r = Array.isArray(rows) && rows[0];
+  if (!r || r.a !== 'X' || r.b !== '$1') {
+    throw new Error(HINT + '（探测返回：' + JSON.stringify(r) + '）');
   }
 }
 
@@ -606,8 +749,14 @@ async function init() {
         const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
         if (e2) throw new Error((e2 && e2.message) || JSON.stringify(e2));
         if (!Array.isArray(d2) || d2.length === 0) throw new Error('exec_sql 返回空，连接可能异常');
+        await assertExecSqlNotStale();
         DRIVER = 'supabase';
         await ensureSchema();
+        // 种子导入放在建管理员之前：种子里自带 admin（密码同为 admin123）与其它用户，
+        // 先导入可保留原始账号信息，initDefaultAdmin 届时发现 admin 已存在会自动跳过。
+        // 单独兜异常——灌数据失败属于「数据不全」，不该升级成「连接失败」把整个驱动拖去降级。
+        try { await importEmbeddedSeed(); }
+        catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
         await initDefaultAdmin();
         console.log('[存储] 已连接 Supabase（JS 客户端 via exec_sql RPC）');
         return;
@@ -634,6 +783,9 @@ async function init() {
     DRIVER = 'sqlite';
     try {
       await ensureSchema();
+      // 兜底库每次冷启动都是空的，必须重新灌入内置数据，否则用户登录进去一片空白
+      try { await importEmbeddedSeed(); }
+      catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
       await initDefaultAdmin();
       console.log('[存储] 使用本地 SQLite 兜底（数据仅进程内，Vercel 冷启动/重启不持久）');
     } catch (e) {
@@ -839,6 +991,8 @@ module.exports = {
   deleteUser,
   init,
   ensureReady,
+  // 内置种子数据导入（init 内部自动调用；导出仅供回归测试验证幂等性）
+  importEmbeddedSeed,
   // 存储彻底不可用时的清晰原因（可用时为 null）
   storageFailure,
   // 诊断用：当前实际生效的驱动
