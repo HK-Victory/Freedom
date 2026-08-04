@@ -99,14 +99,14 @@
         </section>
       </div>
 
-      <!-- 界面主题颜色（所有用户可自定义） -->
+      <!-- 界面主题与背景颜色（所有用户可自定义） -->
       <div class="settings-grid mt-16">
-        <section class="card span-2">
+        <section class="card">
           <header class="card-head">
             <span class="card-icon icon-blue">🎨</span>
-            <h2 class="card-title">界面主题颜色</h2>
+            <h2 class="card-title">主题颜色</h2>
           </header>
-          <p class="text-muted text-sm mb-12">自定义系统主色调。选择下方预设，或使用取色器自定义；设置保存在本机浏览器，刷新后依然生效。</p>
+          <p class="text-muted text-sm mb-12">自定义系统主色调。选择下方预设色卡，或使用取色器自定义；设置保存在本机浏览器，刷新后依然生效。</p>
           <div class="theme-presets">
             <button
               v-for="p in themePresets"
@@ -124,6 +124,34 @@
             <div class="flex align-center gap-8">
               <label class="text-muted text-sm" style="margin: 0;">自定义主色</label>
               <input type="color" v-model="theme.primary" @input="onColorInput" class="color-input" />
+            </div>
+            <button class="btn btn-secondary" @click="resetTheme">恢复默认</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <header class="card-head">
+            <span class="card-icon icon-purple">🌈</span>
+            <h2 class="card-title">背景颜色</h2>
+          </header>
+          <p class="text-muted text-sm mb-12">自定义页面背景色。文字与卡片颜色会随背景明暗自动适配，保证可读；选择预设色卡或使用取色器均可。</p>
+          <div class="theme-presets">
+            <button
+              v-for="b in bgPresets"
+              :key="b.name"
+              class="theme-swatch"
+              :class="{ active: theme.bg.toLowerCase() === b.bg.toLowerCase() }"
+              :style="{ background: b.bg }"
+              :title="b.name"
+              @click="applyBgPreset(b)"
+            >
+              <span v-if="theme.bg.toLowerCase() === b.bg.toLowerCase()" class="swatch-check">✓</span>
+            </button>
+          </div>
+          <div class="flex gap-12 align-center mt-12 flex-wrap">
+            <div class="flex align-center gap-8">
+              <label class="text-muted text-sm" style="margin: 0;">自定义背景</label>
+              <input type="color" v-model="theme.bg" @input="onBgInput" class="color-input" />
             </div>
             <button class="btn btn-secondary" @click="resetTheme">恢复默认</button>
           </div>
@@ -265,18 +293,41 @@
 import { ref, computed, onMounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
-import { loadTheme, saveTheme, PRESET_THEMES, DEFAULT_THEME } from '@/utils/theme'
+import { loadTheme, saveTheme, PRESET_THEMES, BG_PRESETS, DEFAULT_THEME } from '@/utils/theme'
 
 const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 
-// 界面主题颜色（前端本地保存，刷新后生效）
+// 界面主题与背景颜色（前端本地保存，刷新后生效）
 const theme = ref(loadTheme())
 const themePresets = PRESET_THEMES
+const bgPresets = BG_PRESETS
 const applyPreset = (p) => {
-  theme.value = saveTheme({ primary: p.primary, accent: p.accent })
+  theme.value = saveTheme({
+    primary: p.primary,
+    accent: p.accent,
+    bg: theme.value.bg || DEFAULT_THEME.bg
+  })
+}
+const applyBgPreset = (b) => {
+  theme.value = saveTheme({
+    primary: theme.value.primary || DEFAULT_THEME.primary,
+    accent: theme.value.accent || DEFAULT_THEME.accent,
+    bg: b.bg
+  })
 }
 const onColorInput = () => {
-  theme.value = saveTheme({ primary: theme.value.primary, accent: theme.value.accent || DEFAULT_THEME.accent })
+  theme.value = saveTheme({
+    primary: theme.value.primary,
+    accent: theme.value.accent || DEFAULT_THEME.accent,
+    bg: theme.value.bg || DEFAULT_THEME.bg
+  })
+}
+const onBgInput = () => {
+  theme.value = saveTheme({
+    primary: theme.value.primary || DEFAULT_THEME.primary,
+    accent: theme.value.accent || DEFAULT_THEME.accent,
+    bg: theme.value.bg
+  })
 }
 const resetTheme = () => {
   theme.value = saveTheme({ ...DEFAULT_THEME })

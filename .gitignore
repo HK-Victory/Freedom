@@ -9,6 +9,7 @@
 # production
 /dist
 /h5-app/dist
+/h5-app/dist-verify
 /h5-app/node_modules
 
 # runtime artifacts (serverless 环境只读，本地 DB 文件不应入库)
