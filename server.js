@@ -51,6 +51,23 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   });
 }));
 
+// 公开健康检查：仅暴露 Postgres 连通性，不含任何业务数据（便于部署后一行命令自验）
+app.get('/api/health', asyncHandler(async (req, res) => {
+  let connected = false;
+  let urlConfigured = false;
+  try {
+    const s = await getStorageStatus();
+    connected = s.postgres.connected;
+    urlConfigured = s.postgres.urlConfigured;
+  } catch (e) { /* 忽略，默认 connected=false */ }
+  res.json({
+    ok: true,
+    service: 'freedom',
+    postgres: { urlConfigured, connected },
+    time: new Date().toISOString()
+  });
+}));
+
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
