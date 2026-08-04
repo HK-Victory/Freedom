@@ -8,14 +8,25 @@ on:
 # =============================================================
 # 部署配置项（集中读取自 GitHub Actions 的 Secrets / Variables）
 # 配置入口：仓库 Settings → Secrets and variables → Actions
-#   • Secrets 标签页：存放含密码的敏感项（VERCEL_TOKEN / SUPABASE_DB_URL / CRON_SECRET）
-#   • Variables 标签页：存放非敏感项（VERCEL_PROJECT_NAME / APP_URL）
+#   • Secrets 标签页：存放含密码的敏感项
+#       - VERCEL_TOKEN            Vercel 部署令牌（必填）
+#       - SUPABASE_SERVICE_ROLE_KEY  Supabase 服务角色密钥（推荐；后端建表/读写全表权限）
+#       - SUPABASE_ANON_KEY       Supabase 匿名密钥（后端无 service_role 时回退使用；不下发前端）
+#       - SUPABASE_DB_URL         （可选兼容）早期直连串，未配置时忽略
+#       - CRON_SECRET             定时提醒调用密钥（可选）
+#   • Variables 标签页：存放非敏感项
+#       - VERCEL_PROJECT_NAME      Vercel 项目名（默认 freedom，必须全小写）
+#       - SUPABASE_URL             Supabase 项目地址，形如 https://<project-ref>.supabase.co（必填）
+#       - APP_URL                 部署后的正式域名，用于邮件提醒链接（可选）
 # 约定：含密码的项优先读 Secrets，找不到再回退到 Variables；非敏感项直接读 Variables。
 # 下方 env 仅做「取值」，真正的注入在 Deploy 步骤用 `vercel deploy -e` 完成。
 # =============================================================
 env:
   VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
   VERCEL_PROJECT_NAME: ${{ vars.VERCEL_PROJECT_NAME || 'freedom' }}
+  SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_ROLE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY }}
   SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL || vars.SUPABASE_DB_URL }}
   APP_URL: ${{ vars.APP_URL }}
   CRON_SECRET: ${{ secrets.CRON_SECRET || vars.CRON_SECRET }}
@@ -46,14 +57,19 @@ jobs:
 
       - name: 校验 Supabase 部署配置
         run: |
-          if [ -z "$SUPABASE_DB_URL" ]; then
-            echo "::warning::SUPABASE_DB_URL 未配置，应用可启动但所有写操作会失败（前端『设置 → 数据存储状态』显示『连接串缺失』）。请到 Secrets/Variables 添加 SUPABASE_DB_URL，格式见 SUPABASE_SETUP.md。"
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::warning::SUPABASE_URL 未配置，应用将使用本地 SQLite 兜底（数据仅进程内，重启/Vercel 冷启动不持久）。如需持久化，请在 Variables 添加 SUPABASE_URL，并在 Secrets 添加 SUPABASE_SERVICE_ROLE_KEY（或 SUPABASE_ANON_KEY）。"
           else
-            echo "SUPABASE_DB_URL 已配置，将注入 Vercel 运行时。"
+            echo "SUPABASE_URL 已配置: $SUPABASE_URL"
+            if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && [ -z "$SUPABASE_ANON_KEY" ]; then
+              echo "::warning::SUPABASE_URL 已配置但缺少密钥（SUPABASE_SERVICE_ROLE_KEY / SUPABASE_ANON_KEY），后端无法连接 Supabase，将降级到 SQLite 兜底。"
+            else
+              echo "Supabase 密钥已就绪，将注入 Vercel 运行时。"
+            fi
           fi
 
           if [ -z "$APP_URL" ]; then
-            echo "::warning::APP_URL 未配置，邮件提醒中的链接将使用占位域名 https://your-vercel-app.vercel.app。如需正确跳转，请在 Variables 添加 APP_URL（部署后的正式域名，如 https://freedom.vercel.app）。"
+            echo "::warning::APP_URL 未配置，邮件提醒中的链接将使用占位域名 https://your-vercel-app.vercel.app。如需正确跳转，请在 Variables 添加 APP_URL（部署后的正式域名）。"
           fi
 
       - name: Deploy to Vercel (Production)
@@ -63,6 +79,9 @@ jobs:
 
           # 将部署配置注入 Vercel 运行时环境变量（仅非空时注入，避免覆盖/清空已手动配置的值）
           EXTRA_ENV=""
+          [ -n "$SUPABASE_URL" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_URL=$SUPABASE_URL"
+          [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
+          [ -n "$SUPABASE_ANON_KEY" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
           [ -n "$SUPABASE_DB_URL" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_DB_URL=$SUPABASE_DB_URL"
           [ -n "$APP_URL" ] && EXTRA_ENV="$EXTRA_ENV -e APP_URL=$APP_URL"
           [ -n "$CRON_SECRET" ] && EXTRA_ENV="$EXTRA_ENV -e CRON_SECRET=$CRON_SECRET"

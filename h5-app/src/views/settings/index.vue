@@ -229,7 +229,7 @@
           <p class="text-muted text-sm mb-12">
             当前数据持久化方式为 <strong>Supabase Postgres</strong>（关系型数据库，数据真实存放在 Supabase 上）。
             需在 Vercel「Settings → Environment Variables」配置
-            <code>SUPABASE_DB_URL</code>（Supabase 数据库连接串，勾选 Production 环境）。
+            <code>SUPABASE_URL</code> 与 <code>SUPABASE_ANON_KEY</code>（勾选 Production 环境）。
           </p>
           <div class="storage-grid">
             <div class="storage-item">
@@ -352,7 +352,9 @@ const persistWarn = ref('')
 const savingStorage = ref(false)
 const loadSourceText = computed(() => {
   const map = {
+    supabase: 'Supabase Postgres（云端关系型数据库）',
     postgres: 'Supabase Postgres（关系型数据库）',
+    sqlite: '本地 SQLite（离线兜底，重启不持久）',
     blob: 'Vercel Blob（历史数据）',
     kv: 'Vercel KV',
     local: '本地文件',
@@ -513,7 +515,7 @@ const checkPersist = async () => {
   const p = storage.value && storage.value.postgres
   if (p && p.lastSaveOk === false) {
     persistWarn.value = '数据已保存，但未写入 Supabase：' + (p.lastSaveError || '未知原因') +
-      '。请到下方「数据存储状态」检查配置（SUPABASE_DB_URL 须配置到 Vercel 运行时）。'
+      '。请到下方「数据存储状态」检查配置（SUPABASE_URL 与 SUPABASE_ANON_KEY 须配置到 Vercel 运行时）。'
   } else {
     persistWarn.value = ''
   }

@@ -96,7 +96,7 @@ async function checkAndSendReminders(options = {}) {
       try {
         const result = await sendTaskReminder(task, days);
         if (result.sent) {
-          await db.prepare(`UPDATE reminders SET sent = 1, sent_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS') WHERE task_id = ? AND reminder_date = ?`)
+          await db.prepare(`UPDATE reminders SET sent = 1, sent_at = datetime('now','localtime') WHERE task_id = ? AND reminder_date = ?`)
             .run(task.task_id, today);
           sentCount++;
           if (days < 0) overdueCount++;

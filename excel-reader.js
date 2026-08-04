@@ -57,7 +57,7 @@ async function syncTasks(rows) {
     ON CONFLICT(task_id) DO UPDATE SET
       category=@category, name=@name, requirements=@requirements, priority=@priority,
       start_date=@start_date, end_date=@end_date, owner=@owner, resources=@resources,
-      dependency=@dependency, updated_at=to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')
+      dependency=@dependency, updated_at=datetime('now','localtime')
   `);
 
   const ensureDoc = db.prepare(`INSERT INTO documents (task_id, content) VALUES (?, ?) ON CONFLICT(task_id) DO NOTHING`);

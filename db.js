@@ -1,80 +1,80 @@
 /**
- * db.js — Supabase Postgres 存储后端（原生关系表）
+ * db.js — 双驱动公共数据库抽象层（Supabase Postgres / 本地 SQLite 兜底）
  *
- * 迁移说明：
- *   - 旧版基于 sql.js(WASM) 把整个数据库序列化为单文件存 Vercel Blob，存在「多实例内存库互相覆盖、
- *     重部署读不到快照而假丢失」等顽疾。
- *   - 现改为直连 Supabase 的 Postgres 数据库（通过 pg 驱动 + SUPABASE_DB_URL 连接串）。
- *     数据真正以关系表形式存放在 Supabase 上，所有实例共享同一数据源，彻底消除快照/对账/flush 复杂度。
+ * ── 设计目标 ──
+ *   - 对外只暴露一套统一接口：db.prepare(sql).all/get/run 与 db.exec(...)，
+ *     调用方（server.js / excel-reader.js / scheduler.js / email.js）零改动即可切换底层数据库。
+ *   - 两种驱动：
+ *      ① Supabase 驱动：经 @supabase/supabase-js（HTTPS 443）调用 Supabase 上的
+ *         exec_sql RPC（见 scripts/exec_sql.sql），绕开 db.*.supabase.co 直连主机无法公网解析的问题，
+ *         且天然多实例共享同一数据源，根治「多实例内存库互相覆盖 / 重部署假丢失」顽疾。
+ *      ② SQLite 驱动：sql.js（浏览器/Node 可用的 WASM SQLite），作为离线/兜底。
+ *         未配置 Supabase 或连接失败时自动降级，保证应用始终能跑起来（数据仅进程内，重启不持久）。
+ *   - 方言策略：业务代码统一写 SQLite 风格 SQL；Supabase 模式下由「翻译层」转成 Postgres；
+ *     SQLite 模式直接原生执行。这样同一份 SQL 在两种数据库都能跑。
  *
- * 对外接口保持与旧 db.js 类似：
- *   - db.prepare(sql).all/get/run   —— 兼容旧调用方式，但均为 async（需 await）
- *   - getEmailConfig / upsertEmailConfig
- *   - initDefaultAdmin / getUserById / getUserByUsername / listUsers / createUser / updateUser / deleteUser
- *   - getSetting / setSetting / getReminderSettings / setReminderSettings
- *   - getStorageStatus / getLastSave / init / ensureReady
- *
- * SQL 方言：下游代码沿用 SQLite 风格 SQL，这里在「翻译层」把它转成 Postgres 可执行的语句，
- * 从而 server.js / excel-reader.js / scheduler.js / email.js 的业务 SQL 几乎零改动（仅加 await）。
+ * ── 环境变量 ──
+ *   SUPABASE_URL              —— 项目地址，形如 https://<project-ref>.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY —— 服务角色密钥（Settings → API → service_role），拥有建表/读写全表权限（推荐）
+ *   SUPABASE_ANON_KEY         —— 匿名密钥（用户最初提供）；后端仅在无 service_role 时回退使用，
+ *                                exec_sql 已授权 anon，但密钥仅应留在服务端，切勿下发到前端。
+ *   未配置以上任意一项 → 自动使用本地 SQLite 兜底。
  */
 
-const pg = require('pg');
-const { Pool } = pg;
+const { createClient } = require('@supabase/supabase-js');
+const initSqlJs = require('sql.js');
 const bcrypt = require('bcryptjs');
+const path = require('path');
 
-// pg 默认把 int8/BIGSERIAL（OID 20）解析成「字符串」以防大数精度丢失，
-// 但本项目所有自增主键都远小于 2^53，且业务代码存在 `parseInt(req.params.id) === req.user.id`
-// 这类严格相等比较（例如「不能删除自己的账号」保护），字符串 id 会让判断静默失效。
-// 因此统一按数值解析，保持与旧 SQLite 后端一致的类型语义。COUNT(*) 同样受益（返回 number）。
-if (pg.types && typeof pg.types.setTypeParser === 'function') {
-  pg.types.setTypeParser(20, (v) => (v === null || v === undefined ? null : parseInt(v, 10)));
-}
+// ===================== 驱动选择 =====================
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || '';
+const SUPABASE_CONFIGURED = !!(SUPABASE_URL && SUPABASE_KEY);
 
-const CONNECTION_STRING = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || '';
-const POOL_CONFIGURED = !!CONNECTION_STRING;
+let DRIVER = null;            // 'supabase' | 'sqlite'（init 后确定）
+let _supabaseError = null;    // supabase 连接/exec_sql 失败原因（降级时记录）
 
-// Supabase 连接池（PgBouncer，主机含 pooler.supabase.com，端口 6543）默认事务模式，
-// 与 pg 驱动的预编译语句（extended query protocol）不兼容，会产生
-// "prepared statement \"sN\" does not exist" 等错误。追加 pgbouncer=true 让 PgBouncer
-// 正确处理预编译语句。直连（db.*.supabase.co:5432）无需此参数。
-function buildConnectionString(raw) {
-  if (/pooler\.supabase\.com/i.test(raw) && !/[?&]pgbouncer=true/i.test(raw)) {
-    const sep = raw.includes('?') ? '&' : '?';
-    return raw + sep + 'pgbouncer=true';
-  }
-  return raw;
-}
-
-let pool = null;
-function getPool() {
-  if (!pool) {
-    if (!CONNECTION_STRING) {
-      throw new Error('SUPABASE_DB_URL 未配置：数据无法持久化。请在 Vercel / GitHub Actions 变量中配置 Supabase Postgres 连接串。' +
-        '若直连主机(db.*.supabase.co)报 ENOTFOUND 无法解析，请改用控制台 Settings → Database → Connection string 里「Connection pooling」标签页的 pooler 字符串(*.pooler.supabase.com:6543)。');
+// ===================== Supabase 客户端（懒加载）=====================
+let _sb = null;
+function getSupabase() {
+  if (!_sb) {
+    if (!SUPABASE_CONFIGURED) {
+      throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 未配置：数据无法持久化。' +
+        '请在 Vercel / GitHub Actions 变量中配置 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY（或 SUPABASE_ANON_KEY）。');
     }
-    const cs = buildConnectionString(CONNECTION_STRING);
-    pool = new Pool({
-      connectionString: cs,
-      ssl: { rejectUnauthorized: false }, // Supabase 要求 SSL
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000
-    });
-    pool.on('error', (err) => {
-      console.error('[pg] 连接池异常:', err && err.message);
+    _sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
     });
   }
-  return pool;
+  return _sb;
 }
 
-// -------- 持久化状态（用于运行态诊断）--------
+// ===================== SQLite（sql.js 懒加载）=====================
+let _sqliteDb = null;
+let _sqlJsInit = null;
+async function getSqlite() {
+  if (!_sqliteDb) {
+    if (!_sqlJsInit) _sqlJsInit = initSqlJs(); // Node 下自动定位 wasm
+    const SQL = await _sqlJsInit;
+    _sqliteDb = new SQL.Database();
+    _sqliteDb.run('PRAGMA foreign_keys = ON');
+  }
+  return _sqliteDb;
+}
+
+function activeDriver() {
+  if (DRIVER) return DRIVER;
+  return SUPABASE_CONFIGURED ? 'supabase' : 'sqlite';
+}
+
+// ===================== 持久化状态（用于运行态诊断）=====================
 let _lastWriteOk = null;     // 最近一次写是否成功（null=尚无写入）
 let _lastWriteError = null;
 let _lastWriteAt = 0;
 let _schemaReady = false;
 
 // =====================================================================
-//  SQL 翻译层：SQLite 风格 → Postgres
+//  SQL 翻译层：SQLite 风格 → Postgres（仅 Supabase 模式使用）
 // =====================================================================
 
 // 占位符：?（位置参数）与 @name（命名参数）统一转为 $1, $2, ...
@@ -82,7 +82,6 @@ let _schemaReady = false;
 function translatePlaceholders(sql, args) {
   const hasNamed = /@([a-zA-Z0-9_]+)/.test(sql);
   if (hasNamed) {
-    // 命名参数：调用方传入单个对象 { name: value }
     const obj = (args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]))
       ? args[0]
       : {};
@@ -96,24 +95,17 @@ function translatePlaceholders(sql, args) {
     });
     return { sql: newSql, values };
   }
-  // 位置参数：? → $n
   let idx = 0;
   const newSql = sql.replace(/\?/g, () => {
     idx++;
     return '$' + idx;
   });
-  // 调用方可能直接传数组，或逐个标量
   const raw = (args.length === 1 && Array.isArray(args[0])) ? args[0] : Array.from(args);
-  // 关键：按 SQL 中实际出现的最大 $n 截断入参。
-  // 业务代码存在「动态拼 WHERE 条件」的写法（如 GET /api/tasks 无筛选时仍传入空对象 {}），
-  // 若原样透传会出现「实参 1 个、占位符 0 个」的 bind 错误。
-  // 同时也兼容 SQL 中已手写 $n（如 reminders 的日期过滤）而没有 ? 的情况。
   const need = countMaxPlaceholder(newSql);
   const values = raw.slice(0, need);
   return { sql: newSql, values };
 }
 
-// 统计 SQL 中出现的最大位置参数序号（$1, $2 ... → 返回最大的 n）
 function countMaxPlaceholder(sql) {
   let max = 0;
   const re = /\$(\d+)/g;
@@ -125,13 +117,9 @@ function countMaxPlaceholder(sql) {
   return max;
 }
 
-// 函数翻译（占位符已转成 $n 后调用）
 function translateFunctions(sql) {
   let s = sql;
-  // datetime('now','localtime') → 文本时间戳（与 TEXT 列格式一致，便于字符串比较/展示）
   s = s.replace(/datetime\(\s*'now'\s*,\s*'localtime'\s*\)/gi, "to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')");
-  // date('now','localtime','-' || $n || ' days') → 文本日期
-  // 必须把参数显式转成 int，否则 Postgres 对 `date - unknown` 无法确定唯一算子而报错。
   s = s.replace(
     /date\(\s*'now'\s*,\s*'localtime'\s*,\s*'-\s*'\s*\|\|\s*(\$\d+)\s*\|\|\s*'\s*days'\s*\)/gi,
     (m, p) => `to_char(CURRENT_DATE - (${p})::int, 'YYYY-MM-DD')`
@@ -140,7 +128,6 @@ function translateFunctions(sql) {
 }
 
 // INSERT OR IGNORE（SQLite 方言）→ INSERT ... ON CONFLICT DO NOTHING（Postgres）
-// 注意：ON CONFLICT 子句必须位于语句末尾（且在 RETURNING 之前），不能原地替换到表名后面。
 function translateIgnore(sql) {
   if (!/INSERT\s+OR\s+IGNORE\s+INTO/i.test(sql)) return sql;
   let s = sql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/gi, 'INSERT INTO').trim().replace(/;\s*$/, '');
@@ -159,8 +146,6 @@ const TABLES_WITH_ID = new Set([
   'task_logs', 'task_progress', 'users', 'milestones', 'risks'
 ]);
 
-// 对 INSERT 语句自动追加 RETURNING id，便于 run() 返回 lastInsertRowid。
-// 注意：必须先判断目标表是否真的有 id 列，否则 Postgres 会直接报 column "id" does not exist。
 function maybeAddReturning(sql) {
   const t = sql.trim().replace(/\s+/g, ' ');
   if (!/^insert\s+into/i.test(t) || /\breturning\b/i.test(t)) return sql;
@@ -176,57 +161,134 @@ function translate(rawSql, args) {
   return { sql, values: ph.values };
 }
 
-// 执行（统一记录写结果用于诊断）
-async function execute(rawSql, args) {
-  const { sql, values } = translate(rawSql, args);
-  const client = await getPool().connect();
+// SQLite 命名参数绑定修正：sql.js 需要带前缀的键（@name）
+function resolveBindSqlite(args) {
+  let a = args;
+  if (args.length === 1 && Array.isArray(args[0])) a = args[0];
+  if (a.length === 1 && a[0] && typeof a[0] === 'object' && !Array.isArray(a[0])) {
+    const obj = {};
+    for (const k of Object.keys(a[0])) obj['@' + k] = a[0][k];
+    return obj;
+  }
+  return a;
+}
+
+// =====================================================================
+//  统一执行接口（根据当前驱动路由）
+// =====================================================================
+async function execPrepare(rawSql, args, mode) {
+  const driver = activeDriver();
+  if (driver === 'supabase') {
+    const { sql, values } = translate(rawSql, args);
+    let sql2 = sql;
+    if (mode === 'run') sql2 = maybeAddReturning(sql);
+    try {
+      const { data, error } = await getSupabase().rpc('exec_sql', { sql: sql2, params: values });
+      if (error) throw new Error((error && error.message) || JSON.stringify(error));
+      _lastWriteOk = true;
+      _lastWriteError = null;
+      _lastWriteAt = Date.now();
+      if (mode === 'all') return Array.isArray(data) ? data : [];
+      if (mode === 'get') return (Array.isArray(data) && data.length) ? data[0] : null;
+      // run
+      if (Array.isArray(data)) {
+        return {
+          lastInsertRowid: (data[0] && data[0].id != null) ? Number(data[0].id) : null,
+          changes: data.length
+        };
+      }
+      return {
+        lastInsertRowid: null,
+        changes: (data && typeof data.rowCount === 'number') ? data.rowCount : 0
+      };
+    } catch (e) {
+      _lastWriteOk = false;
+      _lastWriteError = e && e.message ? e.message : String(e);
+      console.error('[db] 执行失败:', sql2, '| 参数:', JSON.stringify(values), '| 错误:', _lastWriteError);
+      throw e;
+    }
+  }
+
+  // ---- SQLite 驱动 ----
+  // 注意：sql.js 的 Database 仅提供 run()/exec()，Statement 提供 get()/run() 但【没有 all()】；
+  // 关键坑：stmt.get() 返回的是【值数组】，而非列名→值的对象，也不提供 .all()。
+  // 因此必须配合 stmt.getColumnNames() 把数组映射成对象，才能与 Supabase 路径（返回列名对象）一致，
+  // 否则上层 user.enabled 等字段会变成 undefined（导致「账号已被禁用」）。
+  const sqlite = await getSqlite();
+  const stmt = sqlite.prepare(rawSql);
+  const bind = resolveBindSqlite(args);
   try {
-    const res = await client.query(sql, values);
+    if (Array.isArray(bind) ? bind.length : (bind && typeof bind === 'object')) {
+      stmt.bind(bind);
+    }
     _lastWriteOk = true;
     _lastWriteError = null;
     _lastWriteAt = Date.now();
-    return res;
+    if (mode === 'all') {
+      const cols = stmt.getColumnNames();
+      const rows = [];
+      while (stmt.step()) {
+        const vals = stmt.get();
+        const obj = {};
+        cols.forEach((c, i) => { obj[c] = vals[i]; });
+        rows.push(obj);
+      }
+      return rows;
+    }
+    if (mode === 'get') {
+      if (!stmt.step()) return null;
+      const cols = stmt.getColumnNames();
+      const vals = stmt.get();
+      const obj = {};
+      cols.forEach((c, i) => { obj[c] = vals[i]; });
+      return obj;
+    }
+    // run（INSERT/UPDATE/DELETE）
+    stmt.run();
+    const changes = sqlite.getRowsModified();
+    let lastInsertRowid = null;
+    if (/^\s*insert/i.test(rawSql)) {
+      const li = sqlite.exec('SELECT last_insert_rowid() AS id');
+      if (li.length && li[0].values.length) lastInsertRowid = li[0].values[0][0];
+    }
+    return { lastInsertRowid, changes };
   } catch (e) {
     _lastWriteOk = false;
     _lastWriteError = e && e.message ? e.message : String(e);
-    console.error('[db] 执行失败:', sql, '| 参数:', JSON.stringify(values), '| 错误:', _lastWriteError);
+    console.error('[db] SQLite 执行失败:', rawSql, '| 错误:', _lastWriteError);
     throw e;
   } finally {
-    client.release();
+    if (stmt && typeof stmt.free === 'function') stmt.free();
   }
 }
 
 const db = {
   prepare: (sql) => ({
-    all: (...args) => execute(sql, args).then((r) => r.rows),
-    get: (...args) => execute(sql, args).then((r) => (r.rows && r.rows.length ? r.rows[0] : null)),
-    run: (...args) => {
-      const sql2 = maybeAddReturning(sql);
-      return execute(sql2, args).then((r) => ({
-        lastInsertRowid: (r.rows && r.rows.length && r.rows[0].id != null) ? r.rows[0].id : null,
-        changes: typeof r.rowCount === 'number' ? r.rowCount : 0
-      }));
-    }
+    all: (...args) => execPrepare(sql, args, 'all'),
+    get: (...args) => execPrepare(sql, args, 'get'),
+    run: (...args) => execPrepare(sql, args, 'run')
   }),
-  // 供 schema 初始化使用：逐条执行 DDL（按分号拆分，语句内不含分号字面量）
+  // DDL / 批量：Supabase 按分号拆分逐条 rpc；SQLite 直接一次性执行（支持多语句）
   exec: async (sql) => {
-    const client = await getPool().connect();
-    try {
+    if (activeDriver() === 'supabase') {
       const stmts = sql.split(';').map((s) => s.trim()).filter(Boolean);
       for (const stmt of stmts) {
-        await client.query(stmt);
+        const { error } = await getSupabase().rpc('exec_sql', { sql: stmt, params: [] });
+        if (error) throw new Error((error && error.message) || JSON.stringify(error));
       }
-    } finally {
-      client.release();
+    } else {
+      const s = await getSqlite();
+      // sql.js 的 Database.run 只执行单条语句；建表脚本含多条 CREATE，必须用 exec
+      s.exec(sql);
     }
   }
 };
 
 // =====================================================================
-//  Schema（Postgres DDL，幂等）
+//  Schema（双份：Postgres / SQLite，均为幂等 DDL）
 // =====================================================================
 
-const SCHEMA = `
+const SCHEMA_POSTGRES = `
 CREATE TABLE IF NOT EXISTS tasks (
   id BIGSERIAL PRIMARY KEY,
   task_id TEXT UNIQUE NOT NULL,
@@ -343,15 +405,138 @@ CREATE TABLE IF NOT EXISTS risks (
 );
 `;
 
+const SCHEMA_SQLITE = `
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT UNIQUE NOT NULL,
+  category TEXT,
+  name TEXT NOT NULL,
+  requirements TEXT,
+  priority TEXT,
+  start_date TEXT,
+  end_date TEXT,
+  owner TEXT,
+  resources TEXT,
+  dependency TEXT,
+  status TEXT DEFAULT 'pending',
+  sheet_name TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT UNIQUE NOT NULL,
+  content TEXT DEFAULT '',
+  updated_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_by TEXT DEFAULT '系统',
+  FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS email_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  smtp_host TEXT,
+  smtp_port INTEGER,
+  smtp_user TEXT,
+  smtp_pass TEXT,
+  smtp_secure INTEGER DEFAULT 1,
+  sender_name TEXT DEFAULT '闻道任务提醒',
+  enabled INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS email_recipients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  name TEXT,
+  scope TEXT DEFAULT 'all',
+  task_ids TEXT DEFAULT '[]',
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  reminder_date TEXT NOT NULL,
+  days_before INTEGER,
+  sent INTEGER DEFAULT 0,
+  sent_at TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT,
+  action TEXT,
+  content TEXT,
+  operator TEXT DEFAULT '系统',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS task_progress (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  progress INTEGER DEFAULT 0,
+  note TEXT,
+  recorded_at TEXT DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  display_name TEXT,
+  role TEXT DEFAULT 'user' CHECK (role IN ('admin','user')),
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS milestones (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_type TEXT,
+  time_node TEXT,
+  check_content TEXT,
+  deliverable TEXT,
+  penalty TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS risks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  description TEXT,
+  probability TEXT,
+  impact TEXT,
+  level TEXT,
+  measure TEXT,
+  owner TEXT,
+  trigger TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+`;
+
 // =====================================================================
 //  初始化
 // =====================================================================
 
 async function ensureSchema() {
   if (_schemaReady) return;
-  await db.exec(SCHEMA);
+  if (activeDriver() === 'supabase') {
+    await db.exec(SCHEMA_POSTGRES);
+  } else {
+    const s = await getSqlite();
+    // 必须走 exec（支持多条 CREATE 语句），Database.run 只执行单条
+    s.exec(SCHEMA_SQLITE);
+  }
   _schemaReady = true;
-  console.log('[存储] Supabase Postgres 表结构已就绪（11 张表）');
+  console.log('[存储] 表结构已就绪（11 张表）');
 }
 
 async function initDefaultAdmin() {
@@ -368,20 +553,29 @@ let _readyPromise = null;
 async function init() {
   if (_readyPromise) return _readyPromise;
   _readyPromise = (async () => {
-    if (!POOL_CONFIGURED) {
-      console.warn('[存储] ⚠️ SUPABASE_DB_URL 未配置：数据无法持久化。请在 Vercel 环境变量配置 Supabase Postgres 连接串。');
-      return;
+    // 优先 Supabase；配置齐全则探活 + 确认 exec_sql 可用
+    if (SUPABASE_CONFIGURED) {
+      try {
+        const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
+        if (e2) throw new Error((e2 && e2.message) || JSON.stringify(e2));
+        if (!Array.isArray(d2) || d2.length === 0) throw new Error('exec_sql 返回空，连接可能异常');
+        DRIVER = 'supabase';
+        await ensureSchema();
+        await initDefaultAdmin();
+        console.log('[存储] 已连接 Supabase（JS 客户端 via exec_sql RPC）');
+        return;
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        console.error('[存储] ⚠️ Supabase 连接/exec_sql 失败，降级到本地 SQLite 兜底:', msg);
+        _supabaseError = msg;
+        // 继续走 sqlite 兜底
+      }
     }
-    // 连接探活
-    try {
-      await getPool().query('SELECT 1');
-    } catch (e) {
-      console.error('[存储] ⚠️ 无法连接 Supabase Postgres:', e && e.message);
-      throw e;
-    }
+    // SQLite 离线/兜底
+    DRIVER = 'sqlite';
     await ensureSchema();
     await initDefaultAdmin();
-    console.log('[存储] Supabase Postgres 已连接，数据将持久化到 Supabase。');
+    console.log('[存储] 使用本地 SQLite 兜底（数据仅进程内，Vercel 冷启动/重启不持久）');
   })();
   return _readyPromise;
 }
@@ -443,7 +637,7 @@ async function updateUser(id, fields) {
   if (fields.role !== undefined) { sets.push('role = @role'); params.role = fields.role; }
   if (fields.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = fields.enabled ? 1 : 0; }
   if (fields.password_hash !== undefined) { sets.push('password_hash = @password_hash'); params.password_hash = fields.password_hash; }
-  sets.push("updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')");
+  sets.push("updated_at = datetime('now','localtime')");
   params.id = id;
   return db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = @id`).run(params);
 }
@@ -500,48 +694,42 @@ async function setReminderSettings(s) {
 async function getStorageStatus() {
   let counts = null;
   try {
-    const r = await getPool().query(
+    const r = await db.prepare(
       'SELECT (SELECT COUNT(*) FROM tasks) AS tasks, ' +
       '(SELECT COUNT(*) FROM users) AS users, ' +
       '(SELECT COUNT(*) FROM email_recipients) AS recipients'
-    );
-    counts = r.rows[0];
+    ).all();
+    counts = r[0] || null;
   } catch (e) { /* ignore */ }
 
-  const urlConfigured = POOL_CONFIGURED;
-  let connected = false;
-  let connectError = null;
-  if (urlConfigured) {
-    try {
-      await getPool().query('SELECT 1');
-      connected = true;
-    } catch (e) {
-      connected = false;
-      connectError = e && e.message ? e.message : String(e);
-    }
-  }
+  const driver = DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite');
   return {
-    postgres: {
-      urlConfigured,
-      connected,
-      connectError,
+    driver,
+    loadSource: driver,
+    supabase: {
+      urlConfigured: SUPABASE_CONFIGURED,
+      connected: driver === 'supabase',
+      connectError: driver === 'supabase' ? _supabaseError : null,
       lastSaveOk: _lastWriteOk,
       lastSaveError: _lastWriteError,
       lastSaveAt: _lastWriteAt ? new Date(_lastWriteAt).toISOString() : null
     },
-    loadSource: 'postgres',
+    sqlite: { active: driver === 'sqlite', note: driver === 'sqlite' ? '数据仅进程内，重启/Vercel 冷启动不持久' : null },
     counts
   };
 }
 
 // 最近一次写结果（供写接口在响应中注入 persistWarning，统一暴露持久化失败）
 function getLastSave() {
-  // 即便未配置连接串，只要确实发生过写且未成功，也应判定为失败并告警。
-  const ok = POOL_CONFIGURED && _lastWriteOk !== false;
+  const driver = DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite');
+  const configured = driver === 'sqlite' ? true : SUPABASE_CONFIGURED;
+  const ok = driver === 'sqlite' ? true : (SUPABASE_CONFIGURED && _lastWriteOk !== false);
   return {
-    configured: POOL_CONFIGURED,
+    configured,
     ok,
-    error: _lastWriteError || (!POOL_CONFIGURED ? 'SUPABASE_DB_URL 未配置到运行时：数据无法持久化。' : null),
+    driver,
+    error: _lastWriteError || (driver === 'supabase' && !SUPABASE_CONFIGURED
+      ? 'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 未配置到运行时：数据无法持久化。' : null),
     at: _lastWriteAt ? new Date(_lastWriteAt).toISOString() : null
   };
 }
@@ -564,5 +752,7 @@ module.exports = {
   updateUser,
   deleteUser,
   init,
-  ensureReady
+  ensureReady,
+  // 诊断用：当前实际生效的驱动
+  driver: () => DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite')
 };

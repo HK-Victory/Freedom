@@ -126,7 +126,7 @@ app.put('/api/tasks/:id/status', requireAuth, asyncHandler(async (req, res) => {
   const { status } = req.body;
   const valid = ['pending', 'in_progress', 'completed', 'overdue'];
   if (!valid.includes(status)) return res.status(400).json({ error: '无效状态' });
-  await db.prepare("UPDATE tasks SET status = ?, updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS') WHERE task_id = ?")
+  await db.prepare("UPDATE tasks SET status = ?, updated_at = datetime('now','localtime') WHERE task_id = ?")
     .run(status, req.params.id);
   await db.prepare('INSERT INTO task_logs (task_id, action, content, operator) VALUES (?, ?, ?, ?)')
     .run(req.params.id, 'status_change', `状态变更为: ${status}`, req.body.operator || '用户');
@@ -138,10 +138,10 @@ app.put('/api/tasks/:id/progress', requireAuth, asyncHandler(async (req, res) =>
   await db.prepare('INSERT INTO task_progress (task_id, progress, note) VALUES (?, ?, ?)')
     .run(req.params.id, progress, note || '');
   if (progress >= 100) {
-    await db.prepare("UPDATE tasks SET status = ?, updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS') WHERE task_id = ?")
+    await db.prepare("UPDATE tasks SET status = ?, updated_at = datetime('now','localtime') WHERE task_id = ?")
       .run('completed', req.params.id);
   } else if (progress > 0) {
-    await db.prepare("UPDATE tasks SET status = ?, updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS') WHERE task_id = ?")
+    await db.prepare("UPDATE tasks SET status = ?, updated_at = datetime('now','localtime') WHERE task_id = ?")
       .run('in_progress', req.params.id);
   }
   res.json({ success: true });
@@ -202,7 +202,7 @@ app.put('/api/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
       resources = COALESCE(@resources, resources),
       dependency = COALESCE(@dependency, dependency),
       status = COALESCE(@status, status),
-      updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')
+      updated_at = datetime('now','localtime')
     WHERE task_id = @task_id
   `).run({
     task_id: id,
@@ -251,9 +251,9 @@ app.put('/api/tasks/:id/document', requireAuth, asyncHandler(async (req, res) =>
   const { content, updated_by } = req.body;
   await db.prepare(`
     INSERT INTO documents (task_id, content, updated_at, updated_by)
-    VALUES (?, ?, to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS'), ?)
+    VALUES (?, ?, datetime('now','localtime'), ?)
     ON CONFLICT(task_id) DO UPDATE SET
-      content = ?, updated_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS'), updated_by = ?
+      content = ?, updated_at = datetime('now','localtime'), updated_by = ?
   `).run(req.params.id, content, updated_by || '匿名用户', content, updated_by || '匿名用户');
 
   await db.prepare('INSERT INTO task_logs (task_id, action, content, operator) VALUES (?, ?, ?, ?)')
@@ -412,8 +412,9 @@ app.get('/api/reminders', requireAuth, asyncHandler(async (req, res) => {
   const { days } = req.query;
   let sql = `SELECT r.*, t.name as task_name, t.end_date, t.owner
     FROM reminders r JOIN tasks t ON r.task_id = t.task_id`;
-  // ($1)::int 显式转型：查询串参数是字符串，Postgres 对 `date - unknown` 会报算子不唯一
-  if (days) sql += ` WHERE r.reminder_date >= to_char(CURRENT_DATE - ($1)::int, 'YYYY-MM-DD')`;
+  // 用 SQLite 风格 date('now','localtime','-' || ? || ' days')，翻译层会自动转成 Postgres 的
+  // to_char(CURRENT_DATE - ($1)::int, ...)；SQLite 模式则原生执行。
+  if (days) sql += ` WHERE r.reminder_date >= date('now','localtime','-' || ? || ' days')`;
   sql += ' ORDER BY r.reminder_date DESC';
   const reminders = days ? await db.prepare(sql).all(days) : await db.prepare(sql).all();
   res.json(reminders);

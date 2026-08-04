@@ -9,12 +9,13 @@
  *   （CLI 报 500 是因为那时数据库初始化就失败了；初始化修好后请求卡在 serverless-http）。
  *
  * 初始化：
- *   Supabase Postgres 连接池初始化做成幂等单例（ensureReady），在首个请求前 await 完成，
- *   之后请求直接复用同一个连接池，避免每次冷启动重复建连。
+ *   db.js 的双驱动抽象（ensureReady）做成幂等单例，在首个请求前 await 完成：
+ *   - 配置了 SUPABASE_URL + 密钥 → 经 @supabase/supabase-js 调用 Supabase 上的 exec_sql RPC（HTTPS 443）；
+ *   - 否则自动降级到本地 SQLite（sql.js）兜底，保证应用始终可启动。
  */
-// Vercel 免费(Hobby)老项目函数默认超时仅 10s，而首次请求需完成 Supabase 连接池建连 +
-// 11 张表 CREATE TABLE IF NOT EXISTS + 默认超管创建，可能偏慢。已在 vercel.json 给本函数
-// 配置 maxDuration:60，这里把自保超时对齐到 55s，避免“自己先 503”。
+// Vercel 函数默认超时较短，首次请求需完成数据库初始化（Supabase 探活 + 11 张表
+// CREATE TABLE IF NOT EXISTS + 默认超管创建，或本地 SQLite 建库），可能偏慢。已在 vercel.json
+// 给本函数配置 maxDuration:60，这里把自保超时对齐到 55s，避免“自己先 503”。
 process.on('unhandledRejection', (reason) => console.error('[api] unhandledRejection:', reason));
 process.on('uncaughtException', (e) => console.error('[api] uncaughtException:', e && (e.stack || e.message)));
 

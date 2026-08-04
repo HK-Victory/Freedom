@@ -9,7 +9,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 60,
-      "includeFiles": "node_modules/xlsx/**,node_modules/pg/**"
+      "includeFiles": "node_modules/xlsx/**,node_modules/@supabase/**,node_modules/sql.js/**"
     }
   },
   "env": {

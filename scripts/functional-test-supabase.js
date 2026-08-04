@@ -1,15 +1,16 @@
 /**
- * Freedom 项目 —— Supabase Postgres 存储重构 功能回归测试
+ * Freedom 项目 —— 双驱动（Supabase / SQLite）存储抽象 功能回归测试
  *
  * 设计要点：
- *  1. 用 PGlite（WASM 版真实 Postgres）替换 pg 驱动，因此所有 DDL / ON CONFLICT / to_char /
- *     RETURNING / 类型转换都会被「真 Postgres」校验，而不是手写假对象糊弄过去。
- *  2. 启动【两个互相独立的 server 实例】（清空 require 缓存后重新加载，各自持有独立的 db.js 模块
- *     与连接池），但它们共享同一个 PGlite 数据库 —— 精确模拟 Vercel 多个 serverless 实例
- *     共享一个 Supabase 数据库的真实拓扑。
- *  3. 重点回归历史顽疾：「编辑一个任务后，其它任务状态回退成 pending」。
+ *  1. 用 PGlite（WASM 版真实 Postgres）作为「真 Postgres」校验所有 DDL / ON CONFLICT / to_char /
+ *     RETURNING / 类型转换；同时通过 Module._load 钩子把 @supabase/supabase-js 替换为一个
+ *     由 PGlite 支撑的 exec_sql 实现，从而离线验证 Supabase 驱动（经 exec_sql RPC 的语义）。
+ *  2. 启动【两个互相独立的 server 实例】（清空 require 缓存后重新加载，各自持有独立的 db.js 模块），
+ *     但它们共享同一个 PGlite 数据库 —— 精确模拟 Vercel 多个 serverless 实例共享一个 Supabase
+ *     数据库的真实拓扑，重点回归「编辑一个任务后，其它任务状态回退成 pending」历史顽疾。
+ *  3. 第 18 节用真实 sql.js 验证 SQLite 兜底驱动（schema + CRUD + 存储状态），确保两种方言都能跑。
  *
- * 运行方式（完全离线，不需要真实的 Supabase 连接）：
+ * 运行方式（完全离线，不需要真实 Supabase 连接）：
  *   npm i -D @electric-sql/pglite
  *   node scripts/functional-test-supabase.js
  */
@@ -48,49 +49,55 @@ function section(title) {
   console.log(`\n\x1b[36m▌${title}\x1b[0m`);
 }
 
-// ---------------------------------------------------------------- PGlite 版 pg mock
+// ---------------------------------------------------------------- PGlite 共享库（两个实例共用）
 let pglite = null;
 
-function normalize(r) {
-  const rows = r.rows || [];
-  const affected = typeof r.affectedRows === 'number' ? r.affectedRows : 0;
-  return {
-    rows,
-    // 真实 pg：SELECT 的 rowCount 是返回行数，DML 是影响行数。PGlite 用 affectedRows 表达后者。
-    rowCount: affected > 0 ? affected : rows.length,
-    fields: r.fields || []
-  };
+// ---------------------------------------------------------------- 在 JS 中复刻 exec_sql 的占位符替换逻辑
+// （与 scripts/exec_sql.sql 保持语义一致：按 JSON 类型构造字面量，防注入；从大到小替换 $n 避免误伤 $10）
+async function execSqlJs(sql, params) {
+  sql = String(sql).replace(/;\s*$/, '').trim();
+  const arr = Array.isArray(params) ? params : [];
+  const lits = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v === null || v === undefined) lits.push('NULL');
+    else if (typeof v === 'boolean') lits.push(v ? 'true' : 'false');
+    else if (typeof v === 'number') lits.push(String(v));
+    else lits.push("'" + String(v).replace(/'/g, "''") + "'");
+  }
+  let converted = sql;
+  for (let i = lits.length; i >= 1; i--) {
+    converted = converted.replace(new RegExp('\\$' + i + '\\b', 'g'), lits[i - 1]);
+  }
+  const upper = converted.toUpperCase().replace(/\s+/g, ' ');
+  const isReturning = /\bRETURNING\b/.test(upper);
+  const res = await pglite.query(converted);
+  if (upper.startsWith('SELECT') || upper.startsWith('WITH') || isReturning) {
+    return (res.rows || []).map((row) => Object.assign({}, row));
+  }
+  const rc = (res.rows && res.rows.length)
+    ? res.rows.length
+    : (typeof res.affectedRows === 'number' ? res.affectedRows : 0);
+  return { rowCount: rc };
 }
 
-function buildPgMock() {
-  const run = async (sql, values) => normalize(await pglite.query(sql, values || []));
-
-  class FakeClient {
-    query(sql, values) { return run(sql, values); }
-    release() { /* PGlite 单连接，无需释放 */ }
-  }
-
-  class FakePool {
-    constructor(config) { this.config = config; }
-    query(sql, values) { return run(sql, values); }
-    async connect() { return new FakeClient(); }
-    on() { return this; }
-    async end() { /* noop */ }
-  }
-
-  // db.js 会调用 pg.types.setTypeParser（int8 → number），PGlite 已原生返回 number，此处提供兼容桩
-  return {
-    Pool: FakePool,
-    Client: FakeClient,
-    types: { setTypeParser: () => {} }
-  };
-}
-
-// ---------------------------------------------------------------- 模块加载劫持
-const pgMock = buildPgMock();
+// ---------------------------------------------------------------- 模块加载劫持：用 PGlite 支撑的 exec_sql 替换 @supabase/supabase-js
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
-  if (request === 'pg') return pgMock;
+  if (request === '@supabase/supabase-js') {
+    return {
+      createClient: () => ({
+        rpc: async (name, { sql, params }) => {
+          try {
+            const data = await execSqlJs(sql, params);
+            return { data, error: null };
+          } catch (e) {
+            return { data: null, error: { message: e && e.message ? e.message : String(e) } };
+          }
+        }
+      })
+    };
+  }
   return origLoad.apply(this, arguments);
 };
 
@@ -137,7 +144,8 @@ async function api(inst, method, url, opts = {}) {
   console.log('\n\x1b[1m════ Freedom · Supabase Postgres 存储重构 功能回归测试 ════\x1b[0m');
 
   pglite = await PGlite.create();
-  process.env.SUPABASE_DB_URL = 'postgresql://mock:mock@localhost:5432/mock';
+  process.env.SUPABASE_URL = 'https://mock-project.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'mock-service-role-key';
   delete process.env.VERCEL;
   delete process.env.CRON_SECRET;
 
@@ -197,9 +205,9 @@ async function api(inst, method, url, opts = {}) {
     // ============================================================
     r = await api(A, 'GET', '/api/storage/status', { token: tokenAdmin });
     check('存储状态返回 200', r.status === 200);
-    check('postgres.urlConfigured = true', r.data && r.data.postgres && r.data.postgres.urlConfigured === true);
-    check('postgres.connected = true', r.data && r.data.postgres && r.data.postgres.connected === true);
-    check("loadSource = 'postgres'", r.data && r.data.loadSource === 'postgres');
+    check('supabase.urlConfigured = true', r.data && r.data.supabase && r.data.supabase.urlConfigured === true);
+    check('supabase.connected = true', r.data && r.data.supabase && r.data.supabase.connected === true);
+    check("loadSource = 'supabase'", r.data && r.data.loadSource === 'supabase');
     check('counts 返回 tasks/users/recipients 计数',
       r.data && r.data.counts && r.data.counts.users !== undefined, JSON.stringify(r.data.counts));
 
@@ -529,7 +537,7 @@ async function api(inst, method, url, opts = {}) {
       JSON.stringify(settingRows.rows));
 
     r = await api(A, 'GET', '/api/storage/status', { token: tokenAdmin });
-    check('最近一次写入标记为成功（lastSaveOk=true）', r.data.postgres.lastSaveOk === true);
+    check('最近一次写入标记为成功（lastSaveOk=true）', r.data.supabase.lastSaveOk === true);
     check('counts.tasks 与实际一致', Number(r.data.counts.tasks) === 3, JSON.stringify(r.data.counts));
 
     // ============================================================
@@ -567,6 +575,41 @@ async function api(inst, method, url, opts = {}) {
     check('非重置的增量同步成功', r.status === 200 && r.data.success, JSON.stringify(r.data));
     r = await api(A, 'GET', `/api/tasks/${firstTask.task_id}`, { token: tokenAdmin });
     check('增量同步保留人工设置的任务状态', r.data.status === 'completed', `实际 ${r.data.status}`);
+
+    // ============================================================
+    section('18. 本地 SQLite 离线/兜底驱动（真实 sql.js）');
+    // ============================================================
+    // 关掉 Supabase 环境变量并重新加载 db.js → 自动降级到 SQLite
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    delete process.env.SUPABASE_ANON_KEY;
+    delete process.env.SUPABASE_DB_URL;
+    delete process.env.SUPABASE_KEY;
+    purgeAppModules();
+    const C = await quiet(bootInstance)('实例C(sqlite)');
+
+    let rC = await api(C, 'POST', '/api/auth/login', { body: { username: 'admin', password: 'admin123' } });
+    check('C: admin/admin123 登录成功（sqlite 驱动）', rC.status === 200 && !!rC.data.token, JSON.stringify(rC.data));
+    const tC = rC.data && rC.data.token;
+
+    rC = await api(C, 'GET', '/api/storage/status', { token: tC });
+    check('C: loadSource = sqlite', rC.data && rC.data.loadSource === 'sqlite', JSON.stringify(rC.data && rC.data.loadSource));
+    check('C: sqlite.active = true', rC.data && rC.data.sqlite && rC.data.sqlite.active === true);
+    check('C: supabase.urlConfigured = false（未配置）', rC.data && rC.data.supabase && rC.data.supabase.urlConfigured === false);
+
+    rC = await api(C, 'POST', '/api/tasks', { token: tC, body: mkTask('S001', 'SQLite任务', '2026-08-20') });
+    check('C: 创建任务（sqlite）', rC.status === 200 && rC.data.success, JSON.stringify(rC.data));
+    rC = await api(C, 'GET', '/api/tasks/S001', { token: tC });
+    check('C: 读取任务（sqlite）', rC.status === 200 && rC.data.name === 'SQLite任务', JSON.stringify(rC.data));
+    rC = await api(C, 'PUT', '/api/tasks/S001/status', { token: tC, body: { status: 'completed' } });
+    check('C: 更新状态（sqlite）', rC.status === 200 && rC.data.success, JSON.stringify(rC.data));
+    rC = await api(C, 'GET', '/api/tasks/S001', { token: tC });
+    check('C: 状态真实落库（sqlite）', rC.data.status === 'completed', `实际 ${rC.data && rC.data.status}`);
+    rC = await api(C, 'GET', '/api/dashboard', { token: tC });
+    check('C: 仪表盘可用（sqlite, total=1）', rC.status === 200 && rC.data.total === 1, JSON.stringify(rC.data));
+    rC = await api(C, 'POST', '/api/tasks', { token: tC, body: mkTask('S001', '重复', '2026-08-20') });
+    check('C: 重复 task_id 被拒绝（sqlite, 400）', rC.status === 400);
+    await new Promise((res) => C.server.close(res));
 
   } catch (err) {
     failed++;
