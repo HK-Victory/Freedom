@@ -9,7 +9,7 @@
     "build": "cd h5-app && npm install && npx vite build",
     "vercel-build": "npm run build",
     "make-seed": "node scripts/make-seed.js",
-    "test": "node scripts/functional-test-supabase.js && node scripts/test-sqlite-nowasm.js && node scripts/test-exec-sql-pglite.js && node scripts/test-degrade-midinit.js && node scripts/test-seed-import.js && node scripts/test-stale-execsql.js && node scripts/test-heal-exec-sql.js",
+    "test": "node scripts/functional-test-supabase.js && node scripts/test-sqlite-nowasm.js && node scripts/test-exec-sql-pglite.js && node scripts/test-degrade-midinit.js && node scripts/test-seed-import.js && node scripts/test-stale-execsql.js && node scripts/test-heal-exec-sql.js && node scripts/test-reminder-selection.js",
     "migrate": "node scripts/migrate-to-supabase.js",
     "check:db": "node scripts/check-supabase.js"
   },

@@ -19,11 +19,25 @@ function getDaysUntil(endDateStr) {
   return Math.round((end - today) / (1000 * 60 * 60 * 24));
 }
 
+// 是否需要发送提醒：仅「临期」与「已逾期」任务，绝不全量。
+// - 已逾期 (days < 0)：纳入（除非 includeOverdue=false）
+// - 今日截止 (days === 0)：纳入（临期边界）
+// - 其余未到期：仅当剩余天数落在页面配置的提前提醒天数内
+// 该函数是「定时触发」与「单次触发」共用的唯一筛选规则。
+function taskNeedsReminder(days, leadDays, includeOverdue = true) {
+  if (days === null) return false;
+  if (days < 0) return !!includeOverdue;
+  if (days === 0) return true;
+  return Array.isArray(leadDays) && leadDays.includes(days);
+}
+
 async function checkAndSendReminders(options = {}) {
   // includeOverdue: 是否对「已过期」任务也发送提醒（默认开启）
-  // strictLeadDays: 是否严格只按页面配置的提前天数发送（手动触发可放宽）
-  // force: 是否忽略当日已发送去重（手动「立即触发」用，确保点击即重发，含逾期）
-  const { includeOverdue = true, strictLeadDays = false, force = false } = options;
+  // force: 是否忽略当日已发送去重（手动「立即触发」用，确保点击即重发；但与定时任务
+  //        采用完全相同的「临期+逾期」筛选规则，绝不因单次触发而全量发送）
+  // 注意：定时触发与单次触发使用同一套任务筛选（仅「临期」与「已逾期」才发送），
+  //       区别只在于 force 是否绕过当日去重。
+  const { includeOverdue = true, force = false } = options;
   console.log(`[${new Date().toLocaleString('zh-CN')}] 开始检查任务倒计时提醒...`);
 
   const cfg = await db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
@@ -54,34 +68,30 @@ async function checkAndSendReminders(options = {}) {
     const days = getDaysUntil(task.end_date);
     if (days === null) continue;
 
-    // 判定该任务是否需要发送提醒
-    let shouldRemind = false;
-    if (days < 0) {
-      shouldRemind = includeOverdue;              // 已过期任务：默认纳入提醒
-    } else if (days === 0) {
-      shouldRemind = true;                        // 截止当天：必提醒
-    } else if (strictLeadDays) {
-      shouldRemind = leadDays.includes(days);     // 定时任务：仅按配置的提前天数
-    } else {
-      shouldRemind = true;                        // 手动触发：放宽，所有未过期且未提醒过的都发
-    }
-    if (!shouldRemind) continue;
+    // 只发送「临期」（今日截止或落在配置的提前天数内）与「已逾期」任务，绝不全量发送。
+    // 定时触发与单次触发共用该规则，区别在于 force 是否绕过当日去重。
+    if (!taskNeedsReminder(days, leadDays, includeOverdue)) continue;
 
     const alreadySent = await db.prepare(`
       SELECT id FROM reminders
       WHERE task_id = ? AND reminder_date = ? AND sent = 1
     `).get(task.task_id, today);
 
-    // 手动「立即触发」(force) 时忽略当日去重，强制重新发送（含逾期），确保点击即生效
+    // 定时触发尊重当日去重；单次「立即触发」(force) 绕过去重，确保点击即重发（仍仅限临期+逾期）
     if (!force && alreadySent) {
       skipCount++;
       continue;
     }
 
-    await db.prepare(`
-      INSERT INTO reminders (task_id, reminder_date, days_before, sent)
-      VALUES (?, ?, ?, 0)
-    `).run(task.task_id, today, days);
+    if (alreadySent) {
+      // force 模式下复用当日记录，置回待发送，避免重复插入多行
+      await db.prepare(`UPDATE reminders SET sent = 0 WHERE id = ?`).run(alreadySent.id);
+    } else {
+      await db.prepare(`
+        INSERT INTO reminders (task_id, reminder_date, days_before, sent)
+        VALUES (?, ?, ?, 0)
+      `).run(task.task_id, today, days);
+    }
 
     targets.push({ task, days });
   }
@@ -117,4 +127,4 @@ async function checkAndSendReminders(options = {}) {
   return { sent: sentCount, skipped: skipCount, overdue: overdueCount };
 }
 
-module.exports = { checkAndSendReminders, getDaysUntil };
+module.exports = { checkAndSendReminders, getDaysUntil, taskNeedsReminder };

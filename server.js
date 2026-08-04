@@ -468,8 +468,8 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
     return res.json({ skipped: true, reason: '未到配置的发送时间', now: `${now.h}:${now.m}`, schedule: `${cfg.hour}:${cfg.minute}` });
   }
   try {
-    // 定时任务：严格遵守页面配置的「提前提醒天数」，同时对已过期任务也提醒
-    const r = await checkAndSendReminders({ includeOverdue: true, strictLeadDays: true });
+    // 定时任务与单次触发共用「临期+逾期」筛选规则；此处尊重当日去重
+    const r = await checkAndSendReminders({ includeOverdue: true });
     res.json({ success: true, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
