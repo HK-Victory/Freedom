@@ -99,6 +99,37 @@
         </section>
       </div>
 
+      <!-- 界面主题颜色（所有用户可自定义） -->
+      <div class="settings-grid mt-16">
+        <section class="card span-2">
+          <header class="card-head">
+            <span class="card-icon icon-blue">🎨</span>
+            <h2 class="card-title">界面主题颜色</h2>
+          </header>
+          <p class="text-muted text-sm mb-12">自定义系统主色调。选择下方预设，或使用取色器自定义；设置保存在本机浏览器，刷新后依然生效。</p>
+          <div class="theme-presets">
+            <button
+              v-for="p in themePresets"
+              :key="p.name"
+              class="theme-swatch"
+              :class="{ active: theme.primary.toLowerCase() === p.primary.toLowerCase() }"
+              :style="{ background: p.primary }"
+              :title="p.name"
+              @click="applyPreset(p)"
+            >
+              <span v-if="theme.primary.toLowerCase() === p.primary.toLowerCase()" class="swatch-check">✓</span>
+            </button>
+          </div>
+          <div class="flex gap-12 align-center mt-12 flex-wrap">
+            <div class="flex align-center gap-8">
+              <label class="text-muted text-sm" style="margin: 0;">自定义主色</label>
+              <input type="color" v-model="theme.primary" @input="onColorInput" class="color-input" />
+            </div>
+            <button class="btn btn-secondary" @click="resetTheme">恢复默认</button>
+          </div>
+        </section>
+      </div>
+
       <!-- 定时提醒设置 + 修改密码 同一行 -->
       <div class="settings-grid mt-16">
         <!-- 定时提醒设置（仅超管） -->
@@ -234,8 +265,22 @@
 import { ref, computed, onMounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
+import { loadTheme, saveTheme, PRESET_THEMES, DEFAULT_THEME } from '@/utils/theme'
 
 const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
+
+// 界面主题颜色（前端本地保存，刷新后生效）
+const theme = ref(loadTheme())
+const themePresets = PRESET_THEMES
+const applyPreset = (p) => {
+  theme.value = saveTheme({ primary: p.primary, accent: p.accent })
+}
+const onColorInput = () => {
+  theme.value = saveTheme({ primary: theme.value.primary, accent: theme.value.accent || DEFAULT_THEME.accent })
+}
+const resetTheme = () => {
+  theme.value = saveTheme({ ...DEFAULT_THEME })
+}
 const config = ref({
   smtp_host: '', smtp_port: 465, smtp_user: '', smtp_pass: '',
   smtp_secure: 1, sender_name: '', enabled: 0
@@ -472,7 +517,7 @@ onMounted(() => {
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 .settings-page .card:hover {
-  border-color: rgba(59, 130, 246, 0.45);
+  border-color: var(--primary-soft2);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
@@ -566,6 +611,24 @@ onMounted(() => {
   font-size: 12px;
   color: #93c5fd;
   word-break: break-all;
+}
+
+/* 主题颜色选择 */
+.theme-presets { display: flex; flex-wrap: wrap; gap: 12px; }
+.theme-swatch {
+  width: 40px; height: 40px; border-radius: 10px; border: 2px solid transparent;
+  cursor: pointer; position: relative; transition: transform 0.15s, border-color 0.15s;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 16px;
+}
+.theme-swatch:hover { transform: scale(1.08); }
+.theme-swatch.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--primary);
+}
+.swatch-check { font-weight: 700; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4); }
+.color-input {
+  width: 48px; height: 32px; padding: 2px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); cursor: pointer;
 }
 
 /* 移动端：单列堆叠 */

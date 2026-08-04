@@ -11,6 +11,9 @@
   --danger: #ef4444;
   --text: #e2e8f0;
   --text-secondary: #94a3b8;
+  --accent: #8b5cf6;
+  --primary-soft: rgba(59, 130, 246, 0.1);
+  --primary-soft2: rgba(59, 130, 246, 0.45);
 }
 
 body {
@@ -53,7 +56,7 @@ body {
   transition: all 0.2s;
 }
 .navbar-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
-.navbar-links a.active { color: var(--primary); background: rgba(59,130,246,0.1); }
+.navbar-links a.active { color: var(--primary); background: var(--primary-soft); }
 
 /* 容器 */
 .container {

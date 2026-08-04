@@ -72,7 +72,7 @@ const handleLogin = async () => {
 .login-header { text-align: center; margin-bottom: 28px; }
 .login-logo {
   width: 60px; height: 60px; margin: 0 auto 12px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  background: linear-gradient(135deg, var(--primary), var(--accent));
   border-radius: 16px; display: flex; align-items: center; justify-content: center;
   font-size: 32px;
 }
@@ -87,7 +87,7 @@ const handleLogin = async () => {
   border-radius: 8px; padding: 12px 14px; color: #e2e8f0; font-size: 14px;
 }
 .btn-block {
-  width: 100%; background: #3b82f6; color: white; border: none;
+  width: 100%; background: var(--primary); color: white; border: none;
   border-radius: 8px; padding: 12px; font-size: 15px; font-weight: 600;
   margin-top: 8px;
 }
