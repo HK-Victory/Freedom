@@ -11,6 +11,9 @@ CREATE OR REPLACE FUNCTION exec_sql(sql text, params jsonb DEFAULT '[]')
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
+-- 固定 search_path：SECURITY DEFINER 函数若不固定，可能被调用方改写 search_path 劫持，
+-- Supabase 的安全检查（Security Advisor）也会就此告警。
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   lits text[] := '{}';
@@ -75,3 +78,12 @@ $$;
 -- 仅授权后端使用的 service_role / postgres / anon（anon 仅用于后端 server-side 调用，不下发前端）
 REVOKE EXECUTE ON FUNCTION exec_sql(text, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION exec_sql(text, jsonb) TO postgres, service_role, anon;
+
+-- 【必须执行】通知 PostgREST 重新加载 schema 缓存。
+-- 不执行的话，即使函数已创建，rpc 调用仍会报
+--   "Could not find the function public.exec_sql(params, sql) in the schema cache"
+-- （PostgREST 缓存不会立即感知新函数，自动刷新可能要等较久）。
+NOTIFY pgrst, 'reload schema';
+
+-- 自检：下面这句应返回 [{"ok":1}]，返回即表示函数已就绪。
+-- SELECT exec_sql('SELECT 1 AS ok', '[]'::jsonb);

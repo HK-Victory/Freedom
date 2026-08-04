@@ -1,183 +1,221 @@
-# Supabase 部署与数据迁移说明
+# Supabase 部署与数据存储说明
 
-本项目已重构为 **Vercel（前端 + API）+ Supabase Postgres（数据存储）** 架构。
+本项目采用 **Vercel（前端 + API）+ Supabase Postgres（数据存储）** 架构，
 数据以真实的**关系型表**形式存放在 Supabase 上，不再依赖 Vercel Blob 单文件快照，
 因此彻底消除了「多实例内存库互相覆盖 / 重部署读不到快照而假丢失」等问题。
 
-## 一、Supabase 侧准备
+## 一、连接方式：为什么不用直连串
 
-1. 登录 [supabase.com](https://supabase.com)，新建一个 Project。
-2. 进入 **Settings → Database**，在 **Connection string** 区域选择 **URI** 格式，复制连接串：
+Supabase 控制台给出的 **Direct connection** 串形如：
 
-   ```
-   postgresql://postgres:<你的密码>@db.<project-ref>.supabase.co:5432/postgres
-   ```
+```
+postgresql://postgres:<密码>@db.<project-ref>.supabase.co:5432/postgres
+```
 
-   > 说明：默认直连端口 `5432` 即可。本项目用 `pg` 驱动直连 Supabase Postgres，
-   > 不走 Supabase JS 客户端的 REST 层，因此任意 SQL 都能直接执行。
+⚠️ 该主机 `db.<project-ref>.supabase.co` **没有公网 DNS A 记录**（本项目实测确认），
+从 Vercel 等外部网络访问必然报 `getaddrinfo ENOTFOUND`。
 
-3. （可选）如需更严格的访问控制，可在 Supabase **Authentication → Policies** 中为各表配置 RLS；
-   本项目服务端使用全权限的 `postgres` 连接串，未启用 RLS，逻辑权限由应用层（JWT + 角色）控制。
+因此本项目**不使用任何 5432 直连**，改为通过
+**`@supabase/supabase-js` 客户端 → HTTPS 443 → `exec_sql` RPC** 访问数据库。
+REST 主机 `<project-ref>.supabase.co` 有正常公网解析，从任何网络都能访问，
+从根本上绕开了直连主机不可解析的问题。
 
-## 二、表结构
+## 二、双驱动架构
 
-**无需手动建表**：应用首次启动时（`ensureReady`）会自动执行 `db.js` 中的
-`CREATE TABLE IF NOT EXISTS` 语句，创建以下 11 张表：
+`db.js` 对外只暴露一套统一接口，业务代码（`server.js` 等）完全不感知底层是谁：
+
+```js
+db.prepare(sql).all(...args)   // 多行
+db.prepare(sql).get(...args)   // 单行
+db.prepare(sql).run(...args)   // 写入，返回 { changes, lastInsertRowid }
+db.exec(sql)                   // 多语句（建表）
+```
+
+底层有两个可切换的驱动：
+
+| 驱动 | 何时启用 | 数据持久性 |
+| --- | --- | --- |
+| **Supabase**（主） | `SUPABASE_URL` + 密钥都已配置，且 `exec_sql` 探活成功 | ✅ 持久 |
+| **SQLite**（兜底） | 未配置 Supabase，或连接/探活失败 | ❌ 仅进程内，冷启动即丢 |
+
+> 兜底驱动基于 `sql.js`。它的存在是为了**让服务在数据库不可用时仍能启动并暴露诊断信息**，
+> 而不是让你看到一堆 500。生产环境若发现 `driver: "sqlite"`，说明 Supabase 没连上，**数据不会持久**，
+> 必须按下方「五、排障」处理。
+
+业务 SQL 统一按 **SQLite 方言**书写，Supabase 模式下由 `db.js` 的翻译层自动转成 Postgres：
+
+| SQLite 写法 | 转换后（Postgres） |
+| --- | --- |
+| `?` / `@name` 占位符 | `$1..$n` |
+| `datetime('now','localtime')` | `to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')` |
+| `date('now','localtime','-'\|\|?\|\|' days')` | `to_char(CURRENT_DATE - ($1)::int, 'YYYY-MM-DD')` |
+| `INSERT OR IGNORE` | `INSERT ... ON CONFLICT DO NOTHING` |
+
+## 三、部署步骤
+
+### 步骤 1：创建 `exec_sql` 函数（**必做，只需一次**）
+
+打开 Supabase 控制台 → **SQL Editor** → 新建查询 → 把
+[`scripts/exec_sql.sql`](scripts/exec_sql.sql) **全文**粘贴执行。
+
+> ⚠️ 文件末尾的 `NOTIFY pgrst, 'reload schema';` **必须一并执行**。
+> PostgREST 的 schema 缓存不会立刻感知新函数，漏掉这句会导致函数明明已创建，
+> 调用却仍报 `Could not find the function public.exec_sql(params, sql) in the schema cache`。
+
+自检（应返回 `[{"ok":1}]`）：
+
+```sql
+SELECT exec_sql('SELECT 1 AS ok', '[]'::jsonb);
+```
+
+### 步骤 2：配置部署变量
+
+仓库 **Settings → Secrets and variables → Actions**：
+
+| 名称 | 位置 | 必需 | 说明 |
+| --- | --- | --- | --- |
+| `VERCEL_TOKEN` | Secrets | ✅ | Vercel 部署令牌（https://vercel.com/account/tokens） |
+| `SUPABASE_URL` | Variables 或 Secrets | ✅ | 形如 `https://<project-ref>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Secrets | 推荐 | 服务角色密钥，权限完整 |
+| `SUPABASE_ANON_KEY` | Secrets 或 Variables | 二选一 | 无 service_role 时回退使用 |
+| `VERCEL_PROJECT_NAME` | Variables | 可选 | 默认 `freedom`，**必须全小写** |
+| `APP_URL` | Variables 或 Secrets | 推荐 | 正式域名，用于邮件提醒链接 |
+| `CRON_SECRET` | Secrets 或 Variables | 可选 | 启用 `/api/cron/*` 时校验调用方 |
+
+> **所有 Supabase 相关变量都采用「两个标签页都读」策略**（`vars.X || secrets.X`），
+> 放 Variables 还是 Secrets 都能生效。
+>
+> 这一点曾踩过坑：早期 `SUPABASE_URL` 只读 Variables，而用户把它和密钥一起放进了 Secrets，
+> 结果**密钥注入成功、URL 丢失** → `SUPABASE_CONFIGURED=false` → 静默降级 SQLite，
+> 排查成本极高。现已两边都读。
+
+密钥获取：Supabase 控制台 → **Settings → API** → `Project URL` 与 `Project API keys`。
+
+### 步骤 3：推送部署
+
+push 到 `main` 即触发 `.github/workflows/deploy.yml`，自动构建并把上述变量
+通过 `vercel deploy -e` 注入 Vercel 运行时。
+
+### 步骤 4：验证
+
+```bash
+curl https://<你的域名>/api/health
+```
+
+期望输出（关键是 `driver: "supabase"` 且 `connected: true`）：
+
+```json
+{
+  "ok": true,
+  "driver": "supabase",
+  "supabase": { "urlConfigured": true, "keyConfigured": true, "connected": true, "connectError": null },
+  "sqlite": { "active": false }
+}
+```
+
+## 四、表结构与初始账号
+
+**无需手动建表**：应用首次启动（`ensureReady`）会自动创建 11 张表：
 
 - `tasks` / `documents` / `email_config` / `email_recipients`
 - `reminders` / `task_logs` / `task_progress`
-- `users` / `settings`
-- `milestones` / `risks`（由 Excel 同步逻辑使用）
+- `users` / `settings` / `milestones` / `risks`
 
-首次启动还会自动创建默认超管账号 **admin / admin123**（请上线后立即修改密码）。
+首次启动自动创建默认超管 **admin / admin123**（**请上线后立即修改密码**）。
 
-## 三、Vercel 环境变量
+## 五、排障：`/api/health` 对照表
 
-在 Vercel 项目 **Settings → Environment Variables** 中（**务必勾选 Production**），
-添加：
+健康检查接口**永不返回 500**，故障原因直接写在响应里。按 `connectError` 对照：
 
-| 变量名 | 说明 | 示例 |
+| 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `SUPABASE_DB_URL` | Supabase Postgres 连接串（URI 格式） | `postgresql://postgres:xxx@db.xxx.supabase.co:5432/postgres` |
+| `urlConfigured: false` | 变量没注入到运行时 | 检查 GitHub 变量名拼写；确认 Actions 日志里「SUPABASE_URL 已配置」 |
+| `keyConfigured: false` | 密钥缺失 | 补 `SUPABASE_SERVICE_ROLE_KEY` 或 `SUPABASE_ANON_KEY` |
+| `Could not find the function ... exec_sql` | **步骤 1 没做**，或漏了 `NOTIFY pgrst` | 重新完整执行 `scripts/exec_sql.sql` |
+| `Invalid API key` / `JWT` | 密钥与 URL 不属于同一项目，或已轮换 | 重新从 Settings → API 复制 |
+| `driver: "sqlite"`, `engine: "asm"` | wasm 未打包，已回退纯 JS 引擎 | 服务可用但**数据不持久**，仍需修复 Supabase 连接 |
+| `getaddrinfo ENOTFOUND db.*.supabase.co` | 仍在走已废弃的 5432 直连 | 删除 `SUPABASE_DB_URL` 变量，改用 `SUPABASE_URL` + 密钥 |
 
-> 旧版的 `BLOB_READ_WRITE_TOKEN` / `BLOB_STORE_ID` 已不再需要，可删除。
-> `SUPABASE_DB_URL` 也可在 GitHub 仓库的 **Secrets / Variables** 中配置，
-> 部署工作流 `.github/workflows/deploy.yml` 会在 `vercel deploy` 时自动注入运行时。
+前端 **设置 → 数据存储状态** 也会实时展示同样的信息。
 
-## 四、本地开发
+## 六、本地开发
 
 ```bash
-# 1. 安装依赖（含 pg）
 npm install
 
-# 2. 配置本地/测试用 Supabase 连接串
-export SUPABASE_DB_URL="postgresql://postgres:xxx@db.xxx.supabase.co:5432/postgres"
+# 连 Supabase（可选；不配则自动用 SQLite 兜底，方便离线开发）
+export SUPABASE_URL="https://<project-ref>.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 
-# 3. 启动
-npm run dev        # 监听 http://localhost:3000
+npm run dev        # http://localhost:3000
 ```
 
-未配置 `SUPABASE_DB_URL` 时，服务可启动但所有写操作会报错，并在
-**设置 → 数据存储状态** 中显示「连接串缺失」。
+不配置任何 Supabase 变量时服务照常启动，走 SQLite 兜底，适合纯前端联调。
 
-## 五、从旧版（Vercel Blob / sql.js）迁移数据
-
-旧数据保存在 Vercel Blob 的 `freedom-db.sqlite` 快照中。迁移脚本
-`scripts/migrate-to-supabase.js` 会把旧 sqlite 数据导入新建的 Supabase 表：
+## 七、测试
 
 ```bash
-# 方式 A：从本地 sqlite 文件导入（先把旧 Blob 快照下载到本地，例如 freedom-db.sqlite）
-SUPABASE_DB_URL="postgresql://postgres:xxx@db.xxx.supabase.co:5432/postgres" \
-node scripts/migrate-to-supabase.js --sqlite ./freedom-db.sqlite
-
-# 方式 B：脚本自动从 Vercel Blob 读取（需同时配置旧 Blob 凭据）
-BLOB_READ_WRITE_TOKEN="..." SUPABASE_DB_URL="..." \
-node scripts/migrate-to-supabase.js --from-blob
-```
-
-> 迁移脚本会按 `task_id` / `username` 等自然键做幂等 upsert，重复执行安全。
-> 若暂无旧数据，可直接跳过——首次启动即为空库，超管账号自动创建，
-> 任务数据可通过 **设置 → Excel 同步 / 导入 Excel** 重新载入。
-
-## 六、功能回归测试（离线，无需真实 Supabase）
-
-为了在不依赖外部 Supabase 实例的情况下验证 SQL 方言翻译、多实例共享、
-错误中间件顺序等关键点，项目内置了一个基于 **[PGlite](https://pglite.dev)**
-（WASM 版真实 Postgres）的离线功能测试。它通过 `Module._load` 钩子把 `require('pg')`
-替换成 PGlite 支撑的假 `Pool`/`Client`，再启动**两个 server.js 实例**共享同一个
-PGlite 数据库，精确复现 Vercel「多实例 + 单一 Supabase」的真实拓扑。
-
-```bash
-# 首次运行需安装 PGlite 作为开发依赖
-npm i -D @electric-sql/pglite
-
-# 运行回归测试（122 项断言，覆盖 17 个分组）
 npm test
-# 等价于：node scripts/functional-test-supabase.js
 ```
 
-测试覆盖（全部通过为 `全部通过：122/122`）：
+包含三套，全部离线运行、无需网络或真实 Supabase：
 
-1. 11 张表自动初始化（`CREATE TABLE IF NOT EXISTS`）
+**1. `functional-test-supabase.js` — 132 项断言 / 17 个分组**
+
+用 **[PGlite](https://pglite.dev)**（WASM 版真实 Postgres）通过 `Module._load` 钩子
+模拟 `@supabase/supabase-js`，并启动**两个 server.js 实例**共享同一个库，
+精确复现 Vercel「多实例 + 单一 Supabase」的真实拓扑。覆盖：
+
+1. 11 张表自动初始化
 2. 注册 / 登录 / JWT 鉴权
-3. 存储状态接口（`SUPABASE_DB_URL` 是否配置、连通性、各表行数）
+3. 存储状态接口
 4. 任务 CRUD（含 `RETURNING id` 主键回填）
-5. **核心回归：跨实例编辑不互相覆盖**（实例 A 改任务状态，实例 B 读取其它任务不受影响，且新改动立即对 B 可见）
+5. **核心回归：跨实例编辑不互相覆盖**
 6. 进度 / 状态联动（进度 100% 自动置为已完成）
 7. 文档 upsert（`INSERT OR IGNORE` → `ON CONFLICT DO NOTHING`）
-8. 提醒设置写入（`settings` 表无 `id` 列，验证不误加 `RETURNING id`）
+8. 提醒设置（`settings` 表无 `id` 列，验证不误加 `RETURNING id`）
 9. 邮件配置 / 收件人
-10. 用户管理（自保护：非超管不能删自己；`RETURNING id` 正确回填）
+10. 用户管理（非超管不能删自己）
 11. 仪表盘 / 报表聚合
-12. 里程碑 / 风险 / 提醒（验证 `date(...) - N days` → `to_char(CURRENT_DATE - ($n)::int, ...)` 日期转型）
-13. 定时任务（cron）不报错
-14. 级联删除（删任务连带进度 / 日志）
-15. 错误处理中间件（异步异常返回 500 JSON，而非挂起）
-16. 持久化真实性（两个实例共享同一库，写入对另一实例立即可见）
+12. 里程碑 / 风险 / 提醒（验证日期转型）
+13. 定时任务（cron）
+14. 级联删除
+15. 错误处理中间件
+16. 持久化真实性（写入对另一实例立即可见）
 17. Excel 重置 / 增量导入
 
-> 测试在本地即可运行，不需要任何网络或外部数据库，适合 CI 与本地 PR 校验。
-> 若 PGlite 未安装，测试脚本会给出 `npm i -D @electric-sql/pglite` 的明确提示。
+另含 **场景 C**：真实 `sql.js` 兜底路径的独立验证。
 
-## 七、数据持久化机制变化
+**2. `test-sqlite-nowasm.js` — 5 项**
 
-| 维度 | 旧版（Blob + sql.js） | 新版（Supabase Postgres） |
-| --- | --- | --- |
-| 存储位置 | Vercel Blob 单文件快照 | Supabase 关系表（11 张） |
-| 共享性 | 多实例各自内存库，需快照对账 | 所有实例共享同一 Postgres，天然一致 |
-| 写可见性 | 异步落盘，依赖 flush 中间件 | 每次请求内 `await` 实时写入，立即持久化 |
-| 重部署 | 需从 Blob 重新加载快照 | 无需加载，数据始终在 Supabase |
-| 故障表现 | 静默回退种子/互相覆盖 | 连接失败直接 500，前端可见报错 |
+模拟 Vercel 上 `.wasm` 未被打包的情形（`existsSync` 对 `.wasm` 返回 false），
+验证自动回退 `sql-asm.js`、健康检查不 500、admin 仍可登录。
 
-存储状态可在 **设置 → 数据存储状态** 中实时查看（连接串是否配置、是否连通、最近写入结果、各表行数）。
+**3. `test-exec-sql-pglite.js` — 8 项**
 
-## 八、GitHub Actions 部署变量清单
+用真 Postgres 验证 `exec_sql.sql` 函数本体：字面量替换、`INSERT...RETURNING`、
+`rowCount`、NULL 处理，以及**防注入**（恶意输入被 `quote_literal` 当作纯字符串）。
 
-部署工作流 `.github/workflows/deploy.yml` 在 push 到 `main` 时自动构建并部署到 Vercel。
-所有部署配置集中读取自 **GitHub Actions 的 Secrets / Variables**，仓库内不硬编码任何凭据。
+## 八、安全说明
 
-**配置入口**：仓库 **Settings → Secrets and variables → Actions**
+`exec_sql` 是 `SECURITY DEFINER` 函数，可执行任意 SQL。防护措施：
 
-| 名称 | 存放位置 | 是否必需 | 说明 |
-| --- | --- | --- | --- |
-| `VERCEL_TOKEN` | Secrets | 必需 | Vercel 部署令牌（https://vercel.com/account/tokens） |
-| `SUPABASE_DB_URL` | Secrets 或 Variables | **必需（数据持久化）** | Supabase Postgres 连接串（URI 格式，见下） |
-| `VERCEL_PROJECT_NAME` | Variables | 可选（默认 `freedom`） | Vercel 项目名，**必须全小写** |
-| `APP_URL` | Variables | 推荐 | 部署后的正式域名，用于邮件提醒链接（如 `https://freedom.vercel.app`） |
-| `CRON_SECRET` | Secrets 或 Variables | 可选 | 仅当重新启用 `/api/cron/*` 定时提醒时需要，用于校验调用方 |
+- `REVOKE ... FROM PUBLIC`，仅授权 `postgres` / `service_role` / `anon`。
+- 固定 `SET search_path = public, pg_temp`，防止调用方改写 search_path 劫持。
+- 参数一律经 `quote_literal` 转义为字面量，恶意输入无法破坏 SQL 结构（有测试覆盖）。
+- **密钥仅服务端使用**：前端 `h5-app` 不引入 `@supabase/supabase-js`、不直连数据库，
+  所有数据访问都经后端 API 网关，anon key 绝不下发浏览器。
 
-> 含密码的项（`VERCEL_TOKEN` / `SUPABASE_DB_URL` / `CRON_SECRET`）建议放 **Secrets** 标签页；
-> 工作流对这类项采用 `secrets.X || vars.X` 读取，因此放 Variables 也能生效。
-> 非敏感项（`VERCEL_PROJECT_NAME` / `APP_URL`）放 **Variables** 标签页即可。
->
-> 工作流对这些变量采用「非空才注入」策略：未配置时部署仍会成功（应用可启动），
-> 但缺少 `SUPABASE_DB_URL` 时写操作会报「连接串缺失」、数据不持久。
+> 若需更严格：把 `exec_sql.sql` 的 `GRANT` 收窄为仅 `service_role`，
+> 并在部署变量中改用 `SUPABASE_SERVICE_ROLE_KEY`。
 
-### SUPABASE_DB_URL 格式
+## 九、历史数据迁移（旧版 Blob + sql.js）
 
-在 Supabase 控制台 **Settings → Database → Connection string** 复制连接串。该页面有两个标签页：
-
-**① Connection pooling（连接池 / PgBouncer）— 推荐用于 Vercel 等外部/Serverless 平台：**
-
-```
-postgresql://postgres.<project-ref>:<你的密码>@aws-0-<region>.pooler.supabase.com:6543/postgres
+```bash
+# 从本地 sqlite 文件导入
+node scripts/migrate-to-supabase.js --sqlite ./freedom-db.sqlite
 ```
 
-- 主机为 `*.pooler.supabase.com`、端口 `6543`、用户名带项目引用（`postgres.<project-ref>`）。
-- 该主机**有公网 DNS 解析**，外部平台可直连。
-- `db.js` 检测到 `pooler.supabase.com` 主机会自动追加 `?pgbouncer=true`，避免 PgBouncer 事务模式下 `pg` 预编译语句报错，无需手动处理。
-
-**② Direct connection（直连，端口 5432）：**
-
-```
-postgresql://postgres:<你的密码>@db.<project-ref>.supabase.co:5432/postgres
-```
-
-- ⚠️ **注意**：部分 Supabase 项目的直连主机 `db.<project-ref>.supabase.co` **没有公网 DNS 解析**，从 Vercel 等外部网络会报 `getaddrinfo ENOTFOUND`。若遇此错误，请改用上面的 **Connection pooling** 字符串。
-- 本项目实测即为此情况，已切换为 pooler 字符串。
-
-通用说明：
-
-- `db.js` 用 `pg` 驱动直连，并启用 `ssl: { rejectUnauthorized: false }`（Supabase 要求 SSL）。
-- 项目同时兼容 `DATABASE_URL` 别名（代码 `SUPABASE_DB_URL || DATABASE_URL`）。
-- 未配置时服务可启动，但写操作报「连接串缺失」、数据不持久（前端「设置 → 数据存储状态」可见）。
+> 按 `task_id` / `username` 等自然键幂等 upsert，重复执行安全。
+> 若无旧数据可跳过——首次启动即空库，超管自动创建，
+> 任务数据可通过 **设置 → Excel 同步 / 导入 Excel** 载入。

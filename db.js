@@ -606,7 +606,17 @@ async function init() {
         console.log('[存储] 已连接 Supabase（JS 客户端 via exec_sql RPC）');
         return;
       } catch (e) {
-        const msg = e && e.message ? e.message : String(e);
+        let msg = e && e.message ? e.message : String(e);
+        // 把「函数不存在」这类底层报错翻译成可操作的指引：
+        // 变量都配对了但没建 RPC 是最常见的部署遗漏，原始报错完全看不出该做什么。
+        if (/schema cache|could not find the function|function .*exec_sql.* does not exist/i.test(msg)) {
+          msg = 'Supabase 尚未创建 exec_sql 函数（' + msg + '）。'
+              + '请在 Supabase 控制台 SQL Editor 执行一次 scripts/exec_sql.sql，'
+              + '其中末尾的 NOTIFY pgrst 用于刷新 PostgREST schema 缓存，务必一并执行。';
+        } else if (/Invalid API key|JWT|401|apikey/i.test(msg)) {
+          msg = 'Supabase 密钥无效或已轮换（' + msg + '）。'
+              + '请核对 SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY 与 SUPABASE_URL 是否属于同一个项目。';
+        }
         console.error('[存储] ⚠️ Supabase 连接/exec_sql 失败，降级到本地 SQLite 兜底:', msg);
         _supabaseError = msg;
         // 继续走 sqlite 兜底
