@@ -10,7 +10,8 @@
     "vercel-build": "npm run build",
     "make-seed": "node scripts/make-seed.js",
     "test": "node scripts/functional-test-supabase.js",
-    "migrate": "node scripts/migrate-to-supabase.js"
+    "migrate": "node scripts/migrate-to-supabase.js",
+    "check:db": "node scripts/check-supabase.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
