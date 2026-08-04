@@ -8,19 +8,22 @@
     "dev": "node server.js",
     "build": "cd h5-app && npm install && npx vite build",
     "vercel-build": "npm run build",
-    "make-seed": "node scripts/make-seed.js"
+    "make-seed": "node scripts/make-seed.js",
+    "test": "node scripts/functional-test-supabase.js",
+    "migrate": "node scripts/migrate-to-supabase.js"
   },
   "dependencies": {
-    "@vercel/blob": "2.6.1",
     "bcryptjs": "^3.0.3",
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "nodemailer": "^6.9.15",
-    "sql.js": "1.14.1",
+    "pg": "^8.13.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "sql.js": "1.14.1",
     "vercel": "^56.5.0"
   }
 }

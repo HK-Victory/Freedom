@@ -9,8 +9,8 @@ let _transporterKey = '';
 
 // 复用 transporter：避免每封邮件都重建连接；并设连接/握手/套接字超时，
 // 让 SMTP 慢或不可达时快速失败，而不是卡到 nodemailer 默认的 30~120 秒。
-function getTransporter() {
-  const cfg = getEmailConfig();
+async function getTransporter() {
+  const cfg = await getEmailConfig();
   if (!cfg.smtp_host || !cfg.smtp_user) return null;
 
   const key = `${cfg.smtp_host}|${cfg.smtp_port}|${cfg.smtp_secure}|${cfg.smtp_user}`;
@@ -46,11 +46,11 @@ async function sendMailWithTimeout(transporter, mailOptions, ms = 12000) {
 }
 
 async function sendTestEmail(to) {
-  const cfg = getEmailConfig();
+  const cfg = await getEmailConfig();
   if (!cfg.smtp_host || !cfg.smtp_user) {
     throw new Error('SMTP配置不完整，请先填写SMTP服务器信息');
   }
-  const t = getTransporter();
+  const t = await getTransporter();
   const info = await sendMailWithTimeout(t, {
     from: `"${cfg.sender_name}" <${cfg.smtp_user}>`,
     to,
@@ -68,9 +68,9 @@ async function sendTestEmail(to) {
   return info;
 }
 
-function getRecipientsForTask(taskId) {
-  const all = db.prepare('SELECT * FROM email_recipients WHERE enabled = 1 AND scope = ?').all('all');
-  const specific = db.prepare('SELECT * FROM email_recipients WHERE enabled = 1 AND scope = ?').all('specific');
+async function getRecipientsForTask(taskId) {
+  const all = await db.prepare('SELECT * FROM email_recipients WHERE enabled = 1 AND scope = ?').all('all');
+  const specific = await db.prepare('SELECT * FROM email_recipients WHERE enabled = 1 AND scope = ?').all('specific');
   const filtered = specific.filter(r => {
     try {
       const ids = JSON.parse(r.task_ids || '[]');
@@ -81,13 +81,13 @@ function getRecipientsForTask(taskId) {
 }
 
 async function sendTaskReminder(task, daysBefore) {
-  const cfg = getEmailConfig();
+  const cfg = await getEmailConfig();
   if (!cfg.enabled) return { skipped: true, reason: '邮件提醒未启用' };
 
-  const recipients = getRecipientsForTask(task.task_id);
+  const recipients = await getRecipientsForTask(task.task_id);
   if (recipients.length === 0) return { skipped: true, reason: '无收件人' };
 
-  const t = getTransporter();
+  const t = await getTransporter();
   if (!t) return { skipped: true, reason: 'SMTP未配置' };
 
   const priorityColors = { '高': '#dc2626', '中': '#f59e0b', '低': '#10b981' };
@@ -151,7 +151,7 @@ async function sendTaskReminder(task, daysBefore) {
   });
 
   const logLabel = daysBefore < 0 ? `逾期${-daysBefore}天` : (daysBefore === 0 ? '今日截止' : `倒计时${daysBefore}天`);
-  db.prepare(`INSERT INTO task_logs (task_id, action, content, operator) VALUES (?, ?, ?, ?)`)
+  await db.prepare(`INSERT INTO task_logs (task_id, action, content, operator) VALUES (?, ?, ?, ?)`)
     .run(task.task_id, 'email_reminder', `发送${logLabel}提醒邮件至 ${toList}`, '系统');
 
   return { sent: true, to: toList, messageId: info.messageId };

@@ -26,17 +26,17 @@ async function checkAndSendReminders(options = {}) {
   const { includeOverdue = true, strictLeadDays = false, force = false } = options;
   console.log(`[${new Date().toLocaleString('zh-CN')}] 开始检查任务倒计时提醒...`);
 
-  const cfg = db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
+  const cfg = await db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
   if (!cfg || !cfg.enabled) {
     console.log('  邮件提醒未启用，跳过');
     return { skipped: true, reason: '邮件提醒未启用（请在「系统设置-邮件配置」中启用并配置SMTP）' };
   }
 
   // 页面配置的「提前提醒天数」（如 [1,3,7]），仅在这些剩余天数发送
-  const settings = getReminderSettings();
+  const settings = await getReminderSettings();
   const leadDays = settings.leadDays || [1, 3, 7];
 
-  const tasks = db.prepare(`
+  const tasks = await db.prepare(`
     SELECT * FROM tasks
     WHERE status != 'completed'
       AND end_date IS NOT NULL
@@ -67,7 +67,7 @@ async function checkAndSendReminders(options = {}) {
     }
     if (!shouldRemind) continue;
 
-    const alreadySent = db.prepare(`
+    const alreadySent = await db.prepare(`
       SELECT id FROM reminders
       WHERE task_id = ? AND reminder_date = ? AND sent = 1
     `).get(task.task_id, today);
@@ -78,7 +78,7 @@ async function checkAndSendReminders(options = {}) {
       continue;
     }
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO reminders (task_id, reminder_date, days_before, sent)
       VALUES (?, ?, ?, 0)
     `).run(task.task_id, today, days);
@@ -96,7 +96,7 @@ async function checkAndSendReminders(options = {}) {
       try {
         const result = await sendTaskReminder(task, days);
         if (result.sent) {
-          db.prepare(`UPDATE reminders SET sent = 1, sent_at = datetime('now','localtime') WHERE task_id = ? AND reminder_date = ?`)
+          await db.prepare(`UPDATE reminders SET sent = 1, sent_at = to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS') WHERE task_id = ? AND reminder_date = ?`)
             .run(task.task_id, today);
           sentCount++;
           if (days < 0) overdueCount++;

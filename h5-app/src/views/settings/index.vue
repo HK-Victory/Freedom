@@ -227,36 +227,31 @@
             <h2 class="card-title">数据存储状态</h2>
           </header>
           <p class="text-muted text-sm mb-12">
-            当前数据持久化方式。若 Blob 未真正连接，每次重新部署都会丢失数据。
-            需在 Vercel「Settings → Environment Variables」同时配置
-            <code>BLOB_READ_WRITE_TOKEN</code> 与 <code>BLOB_STORE_ID</code>（均勾选 Production 环境）。
+            当前数据持久化方式为 <strong>Supabase Postgres</strong>（关系型数据库，数据真实存放在 Supabase 上）。
+            需在 Vercel「Settings → Environment Variables」配置
+            <code>SUPABASE_DB_URL</code>（Supabase 数据库连接串，勾选 Production 环境）。
           </p>
           <div class="storage-grid">
             <div class="storage-item">
+              <span class="storage-label">连接串已配置</span>
+              <span class="badge" :class="(storage.postgres && storage.postgres.urlConfigured) ? 'badge-completed' : 'badge-pending'">
+                {{ storage.postgres && storage.postgres.urlConfigured ? '已配置' : '缺失' }}
+              </span>
+            </div>
+            <div class="storage-item">
               <span class="storage-label">真实连接</span>
-              <span class="badge" :class="(storage.blob && storage.blob.connected) ? 'badge-completed' : 'badge-pending'">
-                {{ storage.blob && storage.blob.connected ? '已连通 ✅' : '未连通 ❌' }}
+              <span class="badge" :class="(storage.postgres && storage.postgres.connected) ? 'badge-completed' : 'badge-pending'">
+                {{ storage.postgres && storage.postgres.connected ? '已连通 ✅' : '未连通 ❌' }}
               </span>
             </div>
             <div class="storage-item">
-              <span class="storage-label">BLOB_TOKEN</span>
-              <span class="badge" :class="(storage.blob && storage.blob.tokenConfigured) ? 'badge-completed' : 'badge-pending'">
-                {{ storage.blob && storage.blob.tokenConfigured ? '已配置' : '缺失' }}
+              <span class="storage-label">最近写入结果</span>
+              <span class="badge" :class="(storage.postgres && storage.postgres.lastSaveOk === false) ? 'badge-pending' : 'badge-completed'">
+                {{ storage.postgres && storage.postgres.lastSaveOk === true ? '成功 ✅' : (storage.postgres && storage.postgres.lastSaveOk === false ? '失败 ❌' : '暂无记录') }}
               </span>
             </div>
             <div class="storage-item">
-              <span class="storage-label">BLOB_STORE_ID</span>
-              <span class="badge" :class="(storage.blob && storage.blob.storeIdConfigured) ? 'badge-completed' : 'badge-pending'">
-                {{ storage.blob && storage.blob.storeIdConfigured ? '已配置' : '缺失' }}
-              </span>
-              <span v-if="storage.blob && storage.blob.storeId" class="storage-value code-sm">{{ storage.blob.storeId }}</span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">Blob 中已有快照</span>
-              <span class="storage-value">{{ storage.blob && storage.blob.blobExists ? '是' : '否' }}</span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">本次加载来源</span>
+              <span class="storage-label">存储引擎</span>
               <span class="storage-value">{{ loadSourceText }}</span>
             </div>
             <div class="storage-item">
@@ -264,21 +259,23 @@
               <span class="storage-value">{{ storage.counts ? storage.counts.tasks : '-' }}</span>
             </div>
             <div class="storage-item">
-              <span class="storage-label">上次保存结果</span>
-              <span class="storage-value" :class="storage.blob && storage.blob.lastSaveOk === false ? 'text-danger' : ''">
-                {{ storage.blob && storage.blob.lastSaveOk === true ? '成功 ✅' : (storage.blob && storage.blob.lastSaveOk === false ? '失败 ❌' : '暂无记录') }}<span v-if="storage.blob && storage.blob.lastSaveAt">（{{ formatTime(storage.blob.lastSaveAt) }}）</span>
-              </span>
+              <span class="storage-label">用户数</span>
+              <span class="storage-value">{{ storage.counts ? storage.counts.users : '-' }}</span>
+            </div>
+            <div class="storage-item">
+              <span class="storage-label">收件人数</span>
+              <span class="storage-value">{{ storage.counts ? storage.counts.recipients : '-' }}</span>
             </div>
           </div>
-          <div v-if="storage.blob && storage.blob.connectError" class="storage-error mt-12">
-            ⚠️ 连接 Blob 失败：{{ storage.blob.connectError }}
+          <div v-if="storage.postgres && storage.postgres.connectError" class="storage-error mt-12">
+            ⚠️ 连接 Supabase 失败：{{ storage.postgres.connectError }}
           </div>
-          <div v-if="storage.blob && storage.blob.lastSaveOk === false && storage.blob.lastSaveError" class="storage-error mt-8">
-            ⚠️ 落盘失败：{{ storage.blob.lastSaveError }}
+          <div v-if="storage.postgres && storage.postgres.lastSaveOk === false && storage.postgres.lastSaveError" class="storage-error mt-8">
+            ⚠️ 最近写入失败：{{ storage.postgres.lastSaveError }}
           </div>
           <div class="flex gap-8 mt-12">
             <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">
-              {{ savingStorage ? '保存中…' : '立即保存到存储' }}
+              {{ savingStorage ? '检测中…' : '检测连接' }}
             </button>
             <button class="btn btn-secondary" @click="loadStorageStatus">刷新状态</button>
           </div>
@@ -355,7 +352,8 @@ const persistWarn = ref('')
 const savingStorage = ref(false)
 const loadSourceText = computed(() => {
   const map = {
-    blob: 'Vercel Blob（历史数据已恢复 ✅）',
+    postgres: 'Supabase Postgres（关系型数据库）',
+    blob: 'Vercel Blob（历史数据）',
     kv: 'Vercel KV',
     local: '本地文件',
     seed: '内置种子数据',
@@ -507,15 +505,15 @@ const loadStorageStatus = async () => {
   } catch (err) { /* 非超管或无权限时静默 */ }
 }
 
-// 写操作后调用：刷新存储状态；若落盘失败则弹出醒目告警，避免「保存成功但刷新丢数据」的假象
+// 写操作后调用：刷新存储状态；若写入失败则弹出醒目告警
 const checkPersist = async () => {
   try {
     storage.value = await request.get('/storage/status')
   } catch (err) { /* 非超管或无权限时静默 */ }
-  const b = storage.value && storage.value.blob
-  if (b && b.lastSaveOk === false) {
-    persistWarn.value = '数据已保存，但未持久化到 Blob：' + (b.lastSaveError || '未知原因') +
-      '。重新部署将丢失，请到下方「数据存储状态」检查配置（BLOB_READ_WRITE_TOKEN 须配置到 Vercel 运行时）。'
+  const p = storage.value && storage.value.postgres
+  if (p && p.lastSaveOk === false) {
+    persistWarn.value = '数据已保存，但未写入 Supabase：' + (p.lastSaveError || '未知原因') +
+      '。请到下方「数据存储状态」检查配置（SUPABASE_DB_URL 须配置到 Vercel 运行时）。'
   } else {
     persistWarn.value = ''
   }
@@ -527,7 +525,7 @@ const saveStorage = async () => {
   try {
     const r = await request.post('/storage/save')
     storage.value = r
-    storageMsg.value = r.success ? '已保存到存储' : '保存失败'
+    storageMsg.value = r.success ? '连接正常' : '检测失败'
   } catch (err) {
     storageMsg.value = '保存失败：' + (err.error || err.message || '')
   } finally {

@@ -23,7 +23,7 @@ function verifyToken(token) {
 }
 
 // 认证中间件 - 需要登录
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: '请先登录', code: 'UNAUTHORIZED' });
@@ -35,27 +35,33 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: '登录已过期，请重新登录', code: 'TOKEN_EXPIRED' });
   }
 
-  // 验证用户是否仍存在且启用
-  const user = getUserById(payload.id);
-  if (!user || !user.enabled) {
-    return res.status(401).json({ error: '账号已被禁用或不存在', code: 'USER_DISABLED' });
-  }
+  try {
+    // 验证用户是否仍存在且启用
+    const user = await getUserById(payload.id);
+    if (!user || !user.enabled) {
+      return res.status(401).json({ error: '账号已被禁用或不存在', code: 'USER_DISABLED' });
+    }
 
-  req.user = user;
-  next();
+    req.user = user;
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 // 可选认证中间件 - 如果有token就解析，没有也放行
-function optionalAuth(req, res, next) {
+async function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     const payload = verifyToken(token);
     if (payload) {
-      const user = getUserById(payload.id);
-      if (user && user.enabled) {
-        req.user = user;
-      }
+      try {
+        const user = await getUserById(payload.id);
+        if (user && user.enabled) {
+          req.user = user;
+        }
+      } catch (err) { /* 忽略鉴权异常，按未登录处理 */ }
     }
   }
   next();
