@@ -28,8 +28,17 @@ const path = require('path');
 const fs = require('fs');
 
 // ===================== 驱动选择 =====================
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || '';
+// 注意 trim：从 GitHub/Vercel 面板复制粘贴极易带入首尾空白或换行，
+// 不清理会导致 createClient 抛 "Invalid URL" 或鉴权 401，且现象很难排查。
+const envStr = (...names) => {
+  for (const n of names) {
+    const v = process.env[n];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+};
+const SUPABASE_URL = envStr('SUPABASE_URL');
+const SUPABASE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', 'SUPABASE_KEY');
 const SUPABASE_CONFIGURED = !!(SUPABASE_URL && SUPABASE_KEY);
 
 let DRIVER = null;            // 'supabase' | 'sqlite'（init 后确定）

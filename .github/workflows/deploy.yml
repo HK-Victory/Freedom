@@ -24,11 +24,14 @@ on:
 env:
   VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
   VERCEL_PROJECT_NAME: ${{ vars.VERCEL_PROJECT_NAME || 'freedom' }}
-  SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+  # 注意：URL 本身不敏感，按约定应放 Variables；但实际很容易顺手放进 Secrets。
+  # 若这里只读 vars，就会出现「密钥读到了、URL 没读到」→ 运行时静默降级 SQLite。
+  # 因此非敏感项也统一 vars 优先、secrets 兜底，放哪都能生效。
+  SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_ROLE_KEY }}
   SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY }}
   SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL || vars.SUPABASE_DB_URL }}
-  APP_URL: ${{ vars.APP_URL }}
+  APP_URL: ${{ vars.APP_URL || secrets.APP_URL }}
   CRON_SECRET: ${{ secrets.CRON_SECRET || vars.CRON_SECRET }}
 
 jobs:
@@ -58,7 +61,7 @@ jobs:
       - name: 校验 Supabase 部署配置
         run: |
           if [ -z "$SUPABASE_URL" ]; then
-            echo "::warning::SUPABASE_URL 未配置，应用将使用本地 SQLite 兜底（数据仅进程内，重启/Vercel 冷启动不持久）。如需持久化，请在 Variables 添加 SUPABASE_URL，并在 Secrets 添加 SUPABASE_SERVICE_ROLE_KEY（或 SUPABASE_ANON_KEY）。"
+            echo "::warning::SUPABASE_URL 未配置（Variables 和 Secrets 两个标签页都没找到），应用将使用本地 SQLite 兜底（数据仅进程内，重启/Vercel 冷启动不持久）。如需持久化，请添加 SUPABASE_URL（形如 https://<project-ref>.supabase.co）与 SUPABASE_SERVICE_ROLE_KEY（或 SUPABASE_ANON_KEY）。"
           else
             echo "SUPABASE_URL 已配置: $SUPABASE_URL"
             if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && [ -z "$SUPABASE_ANON_KEY" ]; then
@@ -78,13 +81,19 @@ jobs:
           PROJECT_NAME="${VERCEL_PROJECT_NAME:-freedom}"
 
           # 将部署配置注入 Vercel 运行时环境变量（仅非空时注入，避免覆盖/清空已手动配置的值）
-          EXTRA_ENV=""
-          [ -n "$SUPABASE_URL" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_URL=$SUPABASE_URL"
-          [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY"
-          [ -n "$SUPABASE_ANON_KEY" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
-          [ -n "$SUPABASE_DB_URL" ] && EXTRA_ENV="$EXTRA_ENV -e SUPABASE_DB_URL=$SUPABASE_DB_URL"
-          [ -n "$APP_URL" ] && EXTRA_ENV="$EXTRA_ENV -e APP_URL=$APP_URL"
-          [ -n "$CRON_SECRET" ] && EXTRA_ENV="$EXTRA_ENV -e CRON_SECRET=$CRON_SECRET"
+          # 用数组而非字符串拼接：密钥里可能含空格/引号等特殊字符，
+          # 字符串拼接后展开会被 word-splitting 截断，导致注入的值不完整。
+          EXTRA_ENV=()
+          add_env() {
+            # $1=变量名 $2=值；值为空则跳过
+            [ -n "$2" ] && EXTRA_ENV+=(-e "$1=$2")
+            return 0
+          }
+          add_env SUPABASE_URL "$SUPABASE_URL"
+          add_env SUPABASE_SERVICE_ROLE_KEY "$SUPABASE_SERVICE_ROLE_KEY"
+          add_env SUPABASE_ANON_KEY "$SUPABASE_ANON_KEY"
+          add_env SUPABASE_DB_URL "$SUPABASE_DB_URL"
+          add_env APP_URL "$APP_URL"
+          add_env CRON_SECRET "$CRON_SECRET"
 
-          # shellcheck disable=SC2086
-          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN" $EXTRA_ENV
+          npx vercel deploy --prod --yes --debug --name "$PROJECT_NAME" --token="$VERCEL_TOKEN" "${EXTRA_ENV[@]}"
