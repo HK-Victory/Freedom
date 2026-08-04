@@ -112,7 +112,8 @@ function activeDriver() {
 let _lastWriteOk = null;     // 最近一次写是否成功（null=尚无写入）
 let _lastWriteError = null;
 let _lastWriteAt = 0;
-let _schemaReady = false;
+// 按驱动分别记忆建表状态（不能用单个布尔量，原因见 ensureSchema 注释）
+let _schemaReadyFor = null;   // null | 'supabase' | 'sqlite'
 
 // =====================================================================
 //  SQL 翻译层：SQLite 风格 → Postgres（仅 Supabase 模式使用）
@@ -568,16 +569,21 @@ CREATE TABLE IF NOT EXISTS risks (
 // =====================================================================
 
 async function ensureSchema() {
-  if (_schemaReady) return;
-  if (activeDriver() === 'supabase') {
+  const drv = activeDriver();
+  // 【关键】必须按驱动记忆，不能用一个布尔量。
+  // 降级路径是：Supabase 探活通过 → 建表成功（标记已就绪）→ 后续步骤失败 → 降级 SQLite。
+  // 此时若沿用布尔量，SQLite 分支会被直接 return 跳过，兜底库里一张表都没有，
+  // 表现为 "no such table: users"，且比原始故障更难定位。
+  if (_schemaReadyFor === drv) return;
+  if (drv === 'supabase') {
     await db.exec(SCHEMA_POSTGRES);
   } else {
     const s = await getSqlite();
     // 必须走 exec（支持多条 CREATE 语句），Database.run 只执行单条
     s.exec(SCHEMA_SQLITE);
   }
-  _schemaReady = true;
-  console.log('[存储] 表结构已就绪（11 张表）');
+  _schemaReadyFor = drv;
+  console.log('[存储] 表结构已就绪（11 张表，驱动: ' + drv + '）');
 }
 
 async function initDefaultAdmin() {

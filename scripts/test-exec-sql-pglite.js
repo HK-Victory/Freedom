@@ -65,5 +65,35 @@ function assert(cond, msg) {
   r = await db.query('SELECT exec_sql($1,$2) AS d', ['SELECT $1 AS s', JSON.stringify(["x'); DROP TABLE t; --"])]);
   assert(r.rows[0].d[0].s === "x'); DROP TABLE t; --", '恶意输入作为纯字符串值，未破坏 SQL 结构（防注入）');
 
+  // 7) 【线上事故回归】参数值内部含 "$数字" —— bcrypt 哈希 $2b$10$xxx 是最典型的场景。
+  //    旧实现按参数倒序做全局 regexp_replace，替换 $2 把哈希写入 SQL 后，
+  //    下一轮替换 $1 会命中哈希里 "$10$" 中的 $1，把语句撕成 '$2b$'admin'0$xxx'，
+  //    线上报 syntax error at or near "admin"，导致 Supabase 初始化失败并静默降级。
+  const bcryptHash = '$2b$10$9nhsjqgFqQwT136pS3x3yuhJGtl9C3BsPRcup6D1ERpv4qrFbqgmK';
+  r = await db.query('SELECT exec_sql($1,$2) AS d', [
+    'INSERT INTO t (name, note) VALUES ($1,$2) RETURNING id, name, note',
+    JSON.stringify(['admin', bcryptHash])
+  ]);
+  const bc = r.rows[0].d[0];
+  assert(bc.name === 'admin' && bc.note === bcryptHash,
+    '参数值含 $1/$2/$10 文本（bcrypt 哈希）时不被二次替换污染');
+
+  // 复现原始事故的完整形态：4 个参数，哈希在 $2，字符串在 $1/$4
+  r = await db.query('SELECT exec_sql($1,$2) AS d', [
+    'INSERT INTO t (name, note, age, active) VALUES ($1,$2,$3,$4) RETURNING name, note',
+    JSON.stringify(['admin', bcryptHash, 1, true])
+  ]);
+  assert(r.rows[0].d[0].note === bcryptHash, '4 参数含哈希的 INSERT 完整还原（线上 admin 建号语句）');
+
+  // 8) 值含正则替换串元字符 \1 与 &（旧实现用 regexp_replace，这些会被当作反向引用/整体匹配）
+  const tricky = 'a&b \\1 c$3d';
+  r = await db.query('SELECT exec_sql($1,$2) AS d', ['SELECT $1 AS s', JSON.stringify([tricky])]);
+  assert(r.rows[0].d[0].s === tricky, '值含 & 和 \\1 等正则元字符时原样保留');
+
+  // 9) 占位符 $1 与 $10 共存，不能前缀误伤
+  const p10 = Array.from({ length: 10 }, (_, i) => 'v' + (i + 1));
+  r = await db.query('SELECT exec_sql($1,$2) AS d', ['SELECT $1 AS a, $10 AS b', JSON.stringify(p10)]);
+  assert(r.rows[0].d[0].a === 'v1' && r.rows[0].d[0].b === 'v10', '$1 与 $10 共存时各自正确替换');
+
   console.log('\n=== exec_sql 函数本体验证完成 ===');
 })().catch((e) => { console.error('❌ 异常:', e); process.exitCode = 1; });

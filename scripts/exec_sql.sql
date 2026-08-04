@@ -21,6 +21,11 @@ DECLARE
   n int;
   v jsonb;
   converted text;
+  rest text;
+  m text[];
+  tok text;
+  pos int;
+  idx int;
   upper_sql text;
   is_returning boolean;
   rc int;
@@ -52,11 +57,32 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- 把 $1..$n 占位符替换为对应的字面量（从大到小替换，避免 $1 误伤 $10）
-  converted := sql;
-  FOR i IN REVERSE coalesce(array_length(lits, 1), 0) .. 1 LOOP
-    converted := regexp_replace(converted, '\$' || i, lits[i], 'g');
+  -- 把 $1..$n 占位符替换为对应字面量：单趟从左到右扫描，已替换的内容【不再参与后续匹配】。
+  --
+  -- 【务必不要改回 replace/regexp_replace 逐参数全局替换】——那样有两个致命缺陷：
+  --   1) 参数值本身可能含 "$数字" 文本，最典型的就是 bcrypt 哈希 $2b$10$xxxx。
+  --      先替换 $2 把哈希写进 SQL 后，后一轮替换 $1 会命中哈希里 "$10$" 中的 $1，
+  --      把 SQL 撕成 '$2b$'admin'0$xxxx'，报 syntax error at or near "admin"。
+  --      （倒序替换只能解决 $1 误伤 $10 这种占位符间的前缀冲突，救不了这种情况。）
+  --   2) regexp_replace 的替换串里 \1、& 有特殊含义，值含这些字符会被悄悄篡改。
+  converted := '';
+  rest := sql;
+  LOOP
+    m := regexp_match(rest, '\$([0-9]+)');
+    EXIT WHEN m IS NULL;
+    tok := '$' || m[1];
+    -- 正则取的是最左匹配，故 strpos 定位到的就是该匹配位置
+    pos := strpos(rest, tok);
+    idx := m[1]::int;
+    converted := converted
+              || substr(rest, 1, pos - 1)
+              || CASE
+                   WHEN idx >= 1 AND idx <= coalesce(array_length(lits, 1), 0) THEN lits[idx]
+                   ELSE tok   -- 越界的 $n 原样保留，避免把非占位符文本吃掉
+                 END;
+    rest := substr(rest, pos + length(tok));
   END LOOP;
+  converted := converted || rest;
 
   upper_sql := upper(regexp_replace(sql, '\s+', ' ', 'g'));
   is_returning := upper_sql ~* '\mRETURNING\M';

@@ -135,6 +135,8 @@ curl https://<你的域名>/api/health
 | `Invalid API key` / `JWT` | 密钥与 URL 不属于同一项目，或已轮换 | 重新从 Settings → API 复制 |
 | `driver: "sqlite"`, `engine: "asm"` | wasm 未打包，已回退纯 JS 引擎 | 服务可用但**数据不持久**，仍需修复 Supabase 连接 |
 | `getaddrinfo ENOTFOUND db.*.supabase.co` | 仍在走已废弃的 5432 直连 | 删除 `SUPABASE_DB_URL` 变量，改用 `SUPABASE_URL` + 密钥 |
+| `syntax error at or near "admin"` | 库里是**旧版 `exec_sql`**：按参数倒序全局替换占位符，遇到 bcrypt 哈希 `$2b$10$…` 时，替换 `$1` 会误伤哈希内 `$10$` 里的 `$1`，把语句撕碎 | 重新完整执行一次 `scripts/exec_sql.sql`（新版改为单趟扫描替换） |
+| `sqlite.initError: no such table: users` | 旧版 `ensureSchema` 用单个布尔量记忆建表状态，Supabase 建表成功后再降级，SQLite 分支被跳过 | 已修复为按驱动分别记忆；升级代码即可 |
 
 前端 **设置 → 数据存储状态** 也会实时展示同样的信息。
 
