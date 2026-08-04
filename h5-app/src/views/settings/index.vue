@@ -10,11 +10,6 @@
         </div>
       </div>
 
-      <!-- 持久化告警：保存数据后若未真正落盘到 Blob，立即提示，避免「假成功真丢失」 -->
-      <div v-if="persistWarn" class="alert-banner alert-danger">
-        ⚠️ {{ persistWarn }}
-      </div>
-
       <!-- 邮件通知区 -->
       <div class="settings-grid">
         <!-- SMTP配置 -->
@@ -219,75 +214,12 @@
         </section>
       </div>
 
-      <!-- 数据存储状态（仅超管） -->
-      <div class="mt-16" v-if="user?.role === 'admin'">
-        <section class="card">
-          <header class="card-head">
-            <span class="card-icon icon-blue">💾</span>
-            <h2 class="card-title">数据存储状态</h2>
-          </header>
-          <p class="text-muted text-sm mb-12">
-            当前数据持久化方式为 <strong>Supabase Postgres</strong>（关系型数据库，数据真实存放在 Supabase 上）。
-            需在 Vercel「Settings → Environment Variables」配置
-            <code>SUPABASE_URL</code> 与 <code>SUPABASE_ANON_KEY</code>（勾选 Production 环境）。
-          </p>
-          <div class="storage-grid">
-            <div class="storage-item">
-              <span class="storage-label">连接串已配置</span>
-              <span class="badge" :class="(storage.postgres && storage.postgres.urlConfigured) ? 'badge-completed' : 'badge-pending'">
-                {{ storage.postgres && storage.postgres.urlConfigured ? '已配置' : '缺失' }}
-              </span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">真实连接</span>
-              <span class="badge" :class="(storage.postgres && storage.postgres.connected) ? 'badge-completed' : 'badge-pending'">
-                {{ storage.postgres && storage.postgres.connected ? '已连通 ✅' : '未连通 ❌' }}
-              </span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">最近写入结果</span>
-              <span class="badge" :class="(storage.postgres && storage.postgres.lastSaveOk === false) ? 'badge-pending' : 'badge-completed'">
-                {{ storage.postgres && storage.postgres.lastSaveOk === true ? '成功 ✅' : (storage.postgres && storage.postgres.lastSaveOk === false ? '失败 ❌' : '暂无记录') }}
-              </span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">存储引擎</span>
-              <span class="storage-value">{{ loadSourceText }}</span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">任务数</span>
-              <span class="storage-value">{{ storage.counts ? storage.counts.tasks : '-' }}</span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">用户数</span>
-              <span class="storage-value">{{ storage.counts ? storage.counts.users : '-' }}</span>
-            </div>
-            <div class="storage-item">
-              <span class="storage-label">收件人数</span>
-              <span class="storage-value">{{ storage.counts ? storage.counts.recipients : '-' }}</span>
-            </div>
-          </div>
-          <div v-if="storage.postgres && storage.postgres.connectError" class="storage-error mt-12">
-            ⚠️ 连接 Supabase 失败：{{ storage.postgres.connectError }}
-          </div>
-          <div v-if="storage.postgres && storage.postgres.lastSaveOk === false && storage.postgres.lastSaveError" class="storage-error mt-8">
-            ⚠️ 最近写入失败：{{ storage.postgres.lastSaveError }}
-          </div>
-          <div class="flex gap-8 mt-12">
-            <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">
-              {{ savingStorage ? '检测中…' : '检测连接' }}
-            </button>
-            <button class="btn btn-secondary" @click="loadStorageStatus">刷新状态</button>
-          </div>
-          <p v-if="storageMsg" class="text-muted text-xs mt-8">{{ storageMsg }}</p>
-        </section>
-      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import request from '@/utils/request'
 import Navbar from '@/components/Navbar.vue'
 import { loadTheme, saveTheme, PRESET_THEMES, BG_PRESETS, DEFAULT_THEME } from '@/utils/theme'
@@ -345,29 +277,6 @@ const reminderMsg = ref('')
 const triggering = ref(false)
 const leadDayOptions = [1, 2, 3, 5, 7]
 
-// 数据存储状态（仅超管可见）
-const storage = ref({})
-const storageMsg = ref('')
-const persistWarn = ref('')
-const savingStorage = ref(false)
-const loadSourceText = computed(() => {
-  const map = {
-    supabase: 'Supabase Postgres（云端关系型数据库）',
-    postgres: 'Supabase Postgres（关系型数据库）',
-    sqlite: '本地 SQLite（离线兜底，重启不持久）',
-    blob: 'Vercel Blob（历史数据）',
-    kv: 'Vercel KV',
-    local: '本地文件',
-    seed: '内置种子数据',
-    embedded: '内联种子数据',
-    fresh: '全新空库',
-    none: '未知'
-  }
-  return (storage.value && map[storage.value.loadSource]) || (storage.value && storage.value.loadSource) || '未知'
-})
-const formatTime = (iso) => {
-  try { return new Date(iso).toLocaleString('zh-CN') } catch (e) { return iso }
-}
 
 const loadConfig = async () => {
   try {
@@ -395,7 +304,6 @@ const saveConfig = async () => {
     await request.post('/email/config', config.value)
     saveMsg.value = '配置已保存'
     setTimeout(() => saveMsg.value = '', 3000)
-    await checkPersist()
   } catch (err) {
     saveMsg.value = '保存失败'
   }
@@ -418,7 +326,6 @@ const addRecipient = async () => {
     await request.post('/email/recipients', newRecipient.value)
     newRecipient.value = { email: '', name: '' }
     loadRecipients()
-    await checkPersist()
   } catch (err) {}
 }
 
@@ -426,7 +333,6 @@ const toggleRecipient = async (r) => {
   try {
     await request.put(`/email/recipients/${r.id}`, { ...r, enabled: !r.enabled })
     loadRecipients()
-    await checkPersist()
   } catch (err) {}
 }
 
@@ -435,7 +341,6 @@ const deleteRecipient = async (r) => {
   try {
     await request.delete(`/email/recipients/${r.id}`)
     loadRecipients()
-    await checkPersist()
   } catch (err) {}
 }
 
@@ -476,7 +381,6 @@ const saveReminder = async () => {
     await loadReminder() // 回读确认保存结果，确保页面与后端一致
     reminderMsg.value = '提醒设置已保存'
     setTimeout(() => reminderMsg.value = '', 3000)
-    await checkPersist()
   } catch (err) {
     reminderMsg.value = '保存失败：' + (err.error || '')
   }
@@ -501,49 +405,11 @@ const triggerReminder = async () => {
   }
 }
 
-const loadStorageStatus = async () => {
-  try {
-    storage.value = await request.get('/storage/status')
-  } catch (err) { /* 非超管或无权限时静默 */ }
-}
-
-// 写操作后调用：刷新存储状态；若写入失败则弹出醒目告警
-const checkPersist = async () => {
-  try {
-    storage.value = await request.get('/storage/status')
-  } catch (err) { /* 非超管或无权限时静默 */ }
-  const p = storage.value && storage.value.postgres
-  if (p && p.lastSaveOk === false) {
-    persistWarn.value = '数据已保存，但未写入 Supabase：' + (p.lastSaveError || '未知原因') +
-      '。请到下方「数据存储状态」检查配置（SUPABASE_URL 与 SUPABASE_ANON_KEY 须配置到 Vercel 运行时）。'
-  } else {
-    persistWarn.value = ''
-  }
-}
-
-const saveStorage = async () => {
-  if (savingStorage.value) return
-  savingStorage.value = true
-  try {
-    const r = await request.post('/storage/save')
-    storage.value = r
-    storageMsg.value = r.success ? '连接正常' : '检测失败'
-  } catch (err) {
-    storageMsg.value = '保存失败：' + (err.error || err.message || '')
-  } finally {
-    savingStorage.value = false
-    setTimeout(() => { storageMsg.value = '' }, 3000)
-  }
-}
-
-// 全局持久化告警由 App.vue 统一展示（任意写接口落盘失败都会弹横幅），
-// 本页仅保留「数据存储状态」检查时返回的持久化失败提示（storage 检查专用）。
 
 onMounted(() => {
   loadConfig()
   loadRecipients()
   loadReminder()
-  loadStorageStatus()
 })
 </script>
 
@@ -606,63 +472,6 @@ onMounted(() => {
 .flex-wrap { flex-wrap: wrap; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
 
-/* 数据存储状态 */
-.storage-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin-bottom: 4px;
-}
-.storage-item {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.storage-label { font-size: 12px; color: var(--text-secondary); }
-.storage-value { font-size: 14px; font-weight: 600; color: var(--text); }
-.card p code {
-  background: rgba(255, 255, 255, 0.08);
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #93c5fd;
-}
-@media (max-width: 768px) {
-  .storage-grid { grid-template-columns: repeat(2, 1fr); }
-}
-.storage-error {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  color: #fca5a5;
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-all;
-}
-.text-danger { color: #fca5a5; }
-.alert-banner {
-  border-radius: 12px;
-  padding: 12px 16px;
-  font-size: 13px;
-  line-height: 1.5;
-  margin-bottom: 16px;
-}
-.alert-danger {
-  background: rgba(239, 68, 68, 0.14);
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  color: #fecaca;
-}
-.code-sm {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: #93c5fd;
-  word-break: break-all;
-}
 
 /* 主题颜色选择 */
 .theme-presets { display: flex; flex-wrap: wrap; gap: 12px; }
