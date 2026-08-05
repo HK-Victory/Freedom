@@ -1,20 +1,25 @@
 name: 定时提醒 (Task Reminder Cron)
 
-# 说明：Vercel serverless 没有常驻进程，无法用 node-cron 在站内定时跑。
-# 因此「定时提醒」改用 GitHub Actions 定时工作流，每隔一小时请求一次线上
-# /api/cron/reminders 端点；该端点内部再做「北京时间 hour 是否等于页面配置的发送小时」
-# 的二次校验，只有命中才真正发送，避免每小时都发。
+# 说明：定时提醒由两条独立的触发链共同保障，端点本身按「北京时间 hour == 页面配置的发送小时」
+#       做二次校验，只有命中才真正发送，因此两条链都只需每小时轮询一次：
+#   ① Vercel Cron（vercel.json 的 crons 字段）——由 Vercel 平台在每小时第 0 分钟直接调用
+#      /api/cron/reminders，并用项目 CRON_SECRET 对请求签名（服务端用 @vercel/cron 校验）。
+#   ② 本 GitHub Actions 工作流——每小时第 0 分钟请求一次同一端点（带 ?secret=CRON_SECRET）。
+# 双链互为冗余：任一平台调度抖动/故障，另一条仍可兜底。端点内置「当日 sent=1」去重，
+# 即便两条链在同一分钟都命中配置小时，也不会重复发送邮件。
 #
-# 鉴权：端点要求 CRON_SECRET 一致（若已在仓库 Secrets/Variables 配置）。
-# 配置入口：仓库 Settings → Secrets and variables → Actions
+# 鉴权：端点要求 CRON_SECRET 一致（若已在 Vercel 项目环境变量 / 仓库 Secrets-Variables 配置）。
+# 配置入口（GitHub Actions 侧）：仓库 Settings → Secrets and variables → Actions
 #   • Secrets:  CRON_SECRET（可选，未配置则端点不校验，任何人可调用，建议配置）
 #   • Variables: APP_URL（部署后的正式域名，如 https://freedom-ten-phi.vercel.app；
 #               未配置则回退到下方默认值）
+# 注：Vercel Cron 侧还需要在 Vercel 项目 Environment Variables 里配置同名 CRON_SECRET，
+#     否则 Vercel 不会对请求签名、服务端签名校验会失败（此时端点会因 CRON_SECRET 已设而 401）。
 
 on:
   schedule:
-    # 每小时第 0 分钟触发一次（北京时间 = UTC+8，因此会覆盖 0~23 点每个整点）。
-    # 端点自身按「配置的发送小时」放行，所以这里只需保证足够密的覆盖即可。
+    # 每小时第 0 分钟触发一次（UTC；北京时间 = UTC+8，覆盖 0~23 点每个整点）。
+    # 端点自身按「配置的发送小时」放行，这里只需保证足够密的覆盖即可。
     - cron: '0 * * * *'
   # 允许在 Actions 页面手动点一次立即验证
   workflow_dispatch:

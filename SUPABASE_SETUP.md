@@ -80,7 +80,7 @@ SELECT exec_sql('SELECT 1 AS ok', '[]'::jsonb);
 | `SUPABASE_ANON_KEY` | Secrets 或 Variables | 二选一 | 无 service_role 时回退使用 |
 | `VERCEL_PROJECT_NAME` | Variables | 可选 | 默认 `freedom`，**必须全小写** |
 | `APP_URL` | Variables 或 Secrets | 推荐 | 正式域名，用于邮件提醒链接 |
-| `CRON_SECRET` | Secrets 或 Variables | 可选 | 启用 `/api/cron/*` 时校验调用方 |
+| `CRON_SECRET` | Secrets 或 Variables | **推荐（建议配置）** | 校验 `/api/cron/*` 调用方。**Vercel Cron 用它对请求签名**，因此必须存在于 Vercel 项目运行时环境变量（经 `deploy.yml` 的 `vercel deploy -e CRON_SECRET=...` 注入）；缺失则 Vercel 不签名、服务端签名校验失败 → 定时提醒 401 |
 
 > **所有 Supabase 相关变量都采用「两个标签页都读」策略**（`vars.X || secrets.X`），
 > 放 Variables 还是 Secrets 都能生效。
@@ -88,6 +88,12 @@ SELECT exec_sql('SELECT 1 AS ok', '[]'::jsonb);
 > 这一点曾踩过坑：早期 `SUPABASE_URL` 只读 Variables，而用户把它和密钥一起放进了 Secrets，
 > 结果**密钥注入成功、URL 丢失** → `SUPABASE_CONFIGURED=false` → 静默降级 SQLite，
 > 排查成本极高。现已两边都读。
+
+### 定时提醒的两条触发链（互为冗余）
+- **① Vercel Cron**：`vercel.json` 的 `crons` 字段声明 `GET /api/cron/reminders`（UTC `0 * * * *`，每小时第 0 分钟）。Vercel 用项目 `CRON_SECRET` 对请求做 HMAC 签名，服务端用官方 `@vercel/cron` 的 `verifyCronSignature` 校验。
+- **② GitHub Actions 工作流**：`.github/workflows/reminder-cron.yml`（`0 * * * *`）每小时 curl 同一端点，带 `?secret=<CRON_SECRET>`。
+- 两条链都只需每小时轮询；端点内部按「北京时间 hour == 页面配置的发送小时（默认 20:00）」二次放行，且对当日已发送任务做 `sent=1` 去重，因此**不会重复发送邮件**。
+- ⚠️ 若只想让 Vercel 单独驱动，可禁用 GitHub Actions 工作流；二者并存时无需额外处理并发。
 
 密钥获取：Supabase 控制台 → **Settings → API** → `Project URL` 与 `Project API keys`。
 

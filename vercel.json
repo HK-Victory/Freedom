@@ -12,6 +12,12 @@
       "includeFiles": "node_modules/{xlsx,sql.js,@supabase}/**"
     }
   },
+  "crons": [
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "0 * * * *"
+    }
+  ],
   "env": {
     "NODE_VERSION": "20.x"
   }
