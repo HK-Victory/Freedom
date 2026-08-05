@@ -7,6 +7,7 @@ const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderS
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
+const { isCronAuthorized } = require('./lib/cronAuth');
 const { signToken, requireAuth, optionalAuth, requireAdmin } = require('./auth');
 
 const app = express();
@@ -454,34 +455,11 @@ function beijingNow() {
   return { h: d.getUTCHours(), m: d.getUTCMinutes() };
 }
 
-// 定时提醒端点鉴权：支持两类调用方
-//   1) GitHub Actions 工作流：直接带 ?secret=<CRON_SECRET> 或 x-cron-secret 头；
-//   2) Vercel Cron：Vercel 用项目环境变量 CRON_SECRET 对请求做 HMAC 签名，
-//      经 authorization: Bearer <signature> 头下发，用官方 @vercel/cron 校验。
-// 注意：Vercel Cron 无法在 vercel.json 里附加自定义 query/header，
-//       因此必须走签名校验，不能复用 ?secret= 那套。
-// CRON_SECRET 未配置时退回「不校验」（保留旧行为，任何人可调用，风险自负）。
-async function isCronAuthorized(req) {
-  if (!process.env.CRON_SECRET) return true;
-  // 路径 1：GitHub Actions
-  const secret = req.query.secret || req.headers['x-cron-secret'];
-  if (secret && secret === process.env.CRON_SECRET) return true;
-  // 路径 2：Vercel Cron 签名
-  const auth = req.headers['authorization'];
-  if (auth && auth.startsWith('Bearer ')) {
-    try {
-      const { verifyCronSignature } = require('@vercel/cron');
-      const ok = await verifyCronSignature({ authorization: auth, secret: process.env.CRON_SECRET });
-      if (ok) return true;
-    } catch (e) {
-      console.warn('[cron] Vercel 签名校验异常:', e && e.message);
-    }
-  }
-  return false;
-}
-
+// 定时提醒端点鉴权（Vercel Cron + GitHub Actions 共用）见 lib/cronAuth.js。
+// 关键：Vercel 配置 CRON_SECRET 后，会在 Authorization 头带【明文】Bearer <CRON_SECRET>，
+// 端点直接比对即可（非 HMAC）；GitHub Actions 走 ?secret= 或 x-cron-secret 头。
 app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
-  if (!isCronAuthorized(req)) {
+  if (!isCronAuthorized(req, process.env.CRON_SECRET)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   const cfg = await getReminderSettings();

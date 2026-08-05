@@ -12,11 +12,21 @@ const { sendTaskReminder } = require('./email');
 
 function getDaysUntil(endDateStr) {
   if (!endDateStr) return null;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const end = new Date(endDateStr);
-  end.setHours(0, 0, 0, 0);
-  return Math.round((end - today) / (1000 * 60 * 60 * 24));
+  // 以 UTC 日历日为单位做差，完全不依赖运行时本地时区，避免 serverless 环境
+  // （Vercel 为 UTC）与本地开发（如 Asia/Shanghai）算出相差 1 天的边界问题。
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  let endUTC;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(endDateStr).trim());
+  if (m) {
+    // "YYYY-MM-DD" 当作 UTC 当日零点
+    endUTC = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  } else {
+    const t = new Date(endDateStr).getTime();
+    if (isNaN(t)) return null;
+    endUTC = t;
+  }
+  return Math.round((endUTC - todayUTC) / (1000 * 60 * 60 * 24));
 }
 
 // 是否需要发送提醒：仅「临期」与「已逾期」任务，绝不全量。

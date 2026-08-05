@@ -3,7 +3,8 @@ name: 定时提醒 (Task Reminder Cron)
 # 说明：定时提醒由两条独立的触发链共同保障，端点本身按「北京时间 hour == 页面配置的发送小时」
 #       做二次校验，只有命中才真正发送，因此两条链都只需每小时轮询一次：
 #   ① Vercel Cron（vercel.json 的 crons 字段）——由 Vercel 平台在每小时第 0 分钟直接调用
-#      /api/cron/reminders，并用项目 CRON_SECRET 对请求签名（服务端用 @vercel/cron 校验）。
+#      /api/cron/reminders；Vercel 配置 CRON_SECRET 后会自动在 Authorization 头带上
+#      明文 Bearer <CRON_SECRET>，服务端（lib/cronAuth.js）直接比对。
 #   ② 本 GitHub Actions 工作流——每小时第 0 分钟请求一次同一端点（带 ?secret=CRON_SECRET）。
 # 双链互为冗余：任一平台调度抖动/故障，另一条仍可兜底。端点内置「当日 sent=1」去重，
 # 即便两条链在同一分钟都命中配置小时，也不会重复发送邮件。
@@ -14,7 +15,7 @@ name: 定时提醒 (Task Reminder Cron)
 #   • Variables: APP_URL（部署后的正式域名，如 https://freedom-ten-phi.vercel.app；
 #               未配置则回退到下方默认值）
 # 注：Vercel Cron 侧还需要在 Vercel 项目 Environment Variables 里配置同名 CRON_SECRET，
-#     否则 Vercel 不会对请求签名、服务端签名校验会失败（此时端点会因 CRON_SECRET 已设而 401）。
+#     否则 Vercel 不会在 Authorization 头带 Bearer 令牌、服务端比对会失败（端点会因 CRON_SECRET 已设而 401）。
 
 on:
   schedule:
