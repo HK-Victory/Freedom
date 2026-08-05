@@ -228,6 +228,12 @@ async function execPrepare(rawSql, args, mode) {
     const { sql, values } = translate(rawSql, args);
     let sql2 = sql;
     if (mode === 'run') sql2 = maybeAddReturning(sql);
+    // 关键修复：exec_sql RPC 以 "SELECT %" 前缀判定是否把结果聚合成 JSON 行集；
+    // 业务代码里大量使用「换行+缩进」开头的多行模板字符串（如 `\n  SELECT ...`），
+    // 会让 upper_sql 以空白字符开头，导致 LIKE 'SELECT %' 失配、落入 ELSE 分支
+    // 返回 { rowCount } 对象而非数组 → db.prepare(...).all() 拿到空数组 → 任务/提醒全部落空。
+    // 统一在这里 trim，无论调用方怎么排版，结果集查询都能被正确识别。（exec_sql.sql 中也加了 ltrim 兜底）
+    sql2 = sql2.trim();
     try {
       const { data, error } = await getSupabase().rpc('exec_sql', { sql: sql2, params: values });
       if (error) throw new Error((error && error.message) || JSON.stringify(error));

@@ -31,7 +31,9 @@ DECLARE
   rc int;
   result jsonb;
 BEGIN
-  -- 去掉结尾的分号（rpc 单条调用不应带分隔符）
+  -- 去掉首尾空白与结尾分号（rpc 单条调用不应带分隔符；
+  -- 行首空白会让 upper_sql 以空白开头，导致 LIKE 'SELECT %' 失配、落入 ELSE 返回对象而非数组）
+  sql := regexp_replace(sql, '^\s+', '');
   sql := rtrim(sql, '; ');
 
   IF params IS NULL OR jsonb_typeof(params) <> 'array' THEN
