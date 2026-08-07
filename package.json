@@ -11,7 +11,9 @@
     "make-seed": "node scripts/make-seed.js",
     "test": "node scripts/functional-test-supabase.js && node scripts/test-sqlite-nowasm.js && node scripts/test-exec-sql-pglite.js && node scripts/test-degrade-midinit.js && node scripts/test-seed-import.js && node scripts/test-stale-execsql.js && node scripts/test-heal-exec-sql.js && node scripts/test-reminder-selection.js",
     "migrate": "node scripts/migrate-to-supabase.js",
-    "check:db": "node scripts/check-supabase.js"
+    "check:db": "node scripts/check-supabase.js",
+    "test:cron": "node scripts/test-cron-e2e.js",
+    "test:reminder": "node scripts/test-cron-auth.js && node scripts/test-reminder-selection.js && node scripts/test-cron-e2e.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
