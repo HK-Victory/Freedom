@@ -455,9 +455,9 @@ function beijingNow() {
   return { h: d.getUTCHours(), m: d.getUTCMinutes() };
 }
 
-// 定时提醒端点鉴权（Vercel Cron + GitHub Actions 共用）见 lib/cronAuth.js。
+// 定时提醒端点鉴权（Vercel Cron 为主要调度来源，亦支持手动 ?secret= 调用）见 lib/cronAuth.js。
 // 关键：Vercel 配置 CRON_SECRET 后，会在 Authorization 头带【明文】Bearer <CRON_SECRET>，
-// 端点直接比对即可（非 HMAC）；GitHub Actions 走 ?secret= 或 x-cron-secret 头。
+// 端点直接比对即可（非 HMAC）；手动/测试也可走 ?secret= 或 x-cron-secret 头。
 app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
   if (!isCronAuthorized(req, process.env.CRON_SECRET)) {
     return res.status(401).json({ error: 'unauthorized' });

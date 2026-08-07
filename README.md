@@ -23,7 +23,7 @@
 |------|------|--------|
 | `JWT_SECRET` | JWT 签发密钥 | 自动随机生成（每次冷启动变化，建议固定） |
 | `APP_URL` | 部署后的站点地址（用于邮件中的任务链接） | 空（链接回退为相对路径） |
-| `CRON_SECRET` | 保护 `/api/cron/reminders` 的密钥（Vercel Cron 调用时携带 `?secret=`） | 空（不校验） |
+| `CRON_SECRET` | 保护 `/api/cron/reminders` 的密钥（Vercel Cron 调用时由 `Authorization: Bearer <CRON_SECRET>` 携带，手动也可 `?secret=`） | 空（不校验） |
 | `BLOB_READ_WRITE_TOKEN` | **（推荐）Vercel Blob 读写令牌**，用于跨部署持久化整个数据库文件 | 空（仅用 /tmp，每次部署会重置为种子数据） |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Vercel KV（Upstash）地址与令牌，作为 Blob 不可用时的次级持久化 | 空 |
 
