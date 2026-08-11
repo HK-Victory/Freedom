@@ -803,6 +803,8 @@ async function init() {
         }
         DRIVER = 'supabase';
         await ensureSchema();
+        // 保证提醒相关默认配置落到 settings 表（仅缺省时写入，不覆盖用户已保存值）
+        await ensureDefaultReminderSettings();
         // 种子导入放在建管理员之前：种子里自带 admin（密码同为 admin123）与其它用户，
         // 先导入可保留原始账号信息，initDefaultAdmin 届时发现 admin 已存在会自动跳过。
         // 单独兜异常——灌数据失败属于「数据不全」，不该升级成「连接失败」把整个驱动拖去降级。
@@ -834,6 +836,8 @@ async function init() {
     DRIVER = 'sqlite';
     try {
       await ensureSchema();
+      // 保证提醒相关默认配置落到 settings 表（仅缺省时写入，不覆盖用户已保存值）
+      await ensureDefaultReminderSettings();
       // 兜底库每次冷启动都是空的，必须重新灌入内置数据，否则用户登录进去一片空白
       try { await importEmbeddedSeed(); }
       catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
@@ -969,6 +973,26 @@ async function setReminderSettings(s) {
   await setSetting('reminder_lead_days', JSON.stringify(days.length ? days : [1, 3, 7]));
 }
 
+// 初始化时把「提醒设置」的默认配置写入 settings 表。
+// 关键：仅当对应 key 不存在时才插入，绝不覆盖用户在页面保存过的配置。
+// 作用：即使从未在页面点过「保存」，数据库里也始终存在 reminder_enabled /
+// reminder_hour / reminder_minute / reminder_lead_days 等记录，配置可审计、
+// 可直接查证是否落库（解决「提前提醒天数配置没有落到数据库中」的排查困惑）。
+const DEFAULT_REMINDER_SETTINGS = [
+  ['reminder_enabled', '0'],
+  ['reminder_hour', '20'],
+  ['reminder_minute', '0'],
+  ['reminder_lead_days', JSON.stringify([1, 3, 7])],
+];
+async function ensureDefaultReminderSettings() {
+  for (const [key, value] of DEFAULT_REMINDER_SETTINGS) {
+    const row = await db.prepare('SELECT 1 FROM settings WHERE key = ?').get(key);
+    if (!row) {
+      await db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(key, value);
+    }
+  }
+}
+
 // =====================================================================
 //  存储状态诊断（供 /api/storage/status 与设置页展示）
 // =====================================================================
@@ -1032,6 +1056,7 @@ module.exports = {
   setSetting,
   getReminderSettings,
   setReminderSettings,
+  ensureDefaultReminderSettings,
   getStorageStatus,
   initDefaultAdmin: initDefaultAdminExport,
   getUserById,
