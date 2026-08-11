@@ -468,6 +468,10 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
   }
   const now = beijingNow();
   if (now.h !== cfg.hour) {
+    // Hobby 套餐每日仅允许一个 cron（vercel.json 的 crons.schedule 为 UTC）。
+    // 若此处频繁跳过，多半是「cron 的 UTC 时间」与「页面配置的北京时间发送小时」不一致，
+    // 需在 vercel.json 把 schedule 改成 (北京时间小时 - 8) 的 UTC 表达。
+    console.warn(`[cron/reminders] 跳过：当前北京时间 ${now.h}:${now.m} ≠ 配置的发送小时 ${cfg.hour}:${cfg.minute}。请确认 vercel.json crons.schedule(UTC) 与页面发送小时(北京时间)一致（默认 20:00 北京 = 12:00 UTC）。`);
     return res.json({ skipped: true, reason: '未到配置的发送时间', now: `${now.h}:${now.m}`, schedule: `${cfg.hour}:${cfg.minute}` });
   }
   try {

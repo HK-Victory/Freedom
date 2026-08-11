@@ -197,7 +197,7 @@ const dueTasks = () => [
   const vc = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../vercel.json'), 'utf8'));
   check('vercel.json 含 crons 且非空', Array.isArray(vc.crons) && vc.crons.length >= 1, vc.crons);
   check('cron path = /api/cron/reminders', vc.crons[0].path === '/api/cron/reminders', vc.crons[0]);
-  check('cron schedule = 0 * * * *（每小时）', vc.crons[0].schedule === '0 * * * *', vc.crons[0].schedule);
+  check('cron schedule = 0 12 * * *（每日 12:00 UTC = 20:00 北京，符合 Hobby 每日一次限制）', vc.crons[0].schedule === '0 12 * * *', vc.crons[0].schedule);
 
   server.close();
   console.log(`\n结果：通过 ${pass} 项，失败 ${fail} 项`);
