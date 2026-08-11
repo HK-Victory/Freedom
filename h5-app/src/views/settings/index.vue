@@ -161,7 +161,7 @@
             <span class="card-icon icon-amber">⏰</span>
             <h2 class="card-title">定时提醒设置</h2>
           </header>
-          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的每日执行时间与提前天数（北京时间）。定时任务每小时触发一次，仅在命中配置时间且任务剩余天数匹配时发送。也可点击下方按钮立即手动触发一次。</p>
+          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的发送开关与提前天数（北京时间）。系统由 Vercel Cron 每日 20:00（北京时间）自动触发发送，发送时间由部署配置固定，不可在页面修改。也可点击下方按钮立即手动触发一次。</p>
           <div class="form-group">
             <label>启用定时提醒</label>
             <select v-model="reminder.enabled" class="form-select">
@@ -171,11 +171,7 @@
           </div>
           <div class="form-group">
             <label>每日执行时间（北京时间）</label>
-            <div class="flex gap-8 align-center">
-              <input v-model.number="reminder.hour" type="number" min="0" max="23" class="form-input" style="width: 80px;" />
-              <span>时</span>
-              <span class="text-muted text-xs">（Vercel 免费版定时任务按整点触发，建议填整点）</span>
-            </div>
+            <p class="text-muted">每日 20:00 自动发送（由 Vercel Cron 固定触发，页面不可修改）</p>
           </div>
           <div class="form-group">
             <label>提前提醒天数（任务截止前 N 天发送）</label>
@@ -272,7 +268,7 @@ const pwdForm = ref({ old_password: '', new_password: '' })
 const pwdMsg = ref('')
 
 // 定时提醒设置
-const reminder = ref({ enabled: 0, hour: 20, leadDays: [1, 3, 7] })
+const reminder = ref({ enabled: 0, leadDays: [1, 3, 7] })
 const reminderMsg = ref('')
 const triggering = ref(false)
 const leadDayOptions = [1, 2, 3, 5, 7]
@@ -360,7 +356,6 @@ const loadReminder = async () => {
     const d = await request.get('/settings/reminder')
     reminder.value = {
       enabled: d.enabled ? 1 : 0,
-      hour: d.hour ?? 20,
       leadDays: Array.isArray(d.leadDays) && d.leadDays.length ? d.leadDays : [1, 3, 7]
     }
   } catch (err) {}
@@ -374,8 +369,6 @@ const saveReminder = async () => {
       .filter(n => Number.isFinite(n) && n >= 0);
     await request.put('/settings/reminder', {
       enabled: !!reminder.value.enabled,
-      hour: Number(reminder.value.hour) || 0,
-      minute: 0,
       leadDays: leadDays.length ? leadDays : [1, 3, 7]
     })
     await loadReminder() // 回读确认保存结果，确保页面与后端一致

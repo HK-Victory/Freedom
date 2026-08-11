@@ -4,7 +4,7 @@
  * 目标：在完全离线、可复现的环境下，认真验证 Vercel Cron 触发的完整逻辑链：
  *   1) 鉴权：Vercel 明文 Bearer <CRON_SECRET>（以及保留的 ?secret= 手动入口）
  *   2) 提醒总开关门：getReminderSettings().enabled === false → 直接跳过，不发送
- *   3) 北京时间小时门：仅在 beijingNow().h === 配置 hour 时才发送，否则跳过（关键：不能误发）
+ *   3) 发送时间由 Vercel Cron 固定触发（vercel.json 0 12 * * * = 北京 20:00），端点到达即发送，不再受页面 hour 字段门禁影响
  *   4) 邮件总开关门：email_config.enabled === 0 → 跳过，不发送
  *   5) 实际发送：仅「临期(今日/落在提前天数) + 逾期」被选中，已完成/远期/无截止日任务被排除
  *   6) 当日去重：同一 UTC 日二次触发（force=false）应 skipped 全部、sent=0
@@ -156,11 +156,11 @@ const dueTasks = () => [
   r = await request(port, 'GET', '/api/cron/reminders', AUTH);
   check('未启用提醒 → 跳过且不发送', r.body.skipped === true && emailCalls.length === 0, r.body);
 
-  console.log('\n[3] 北京时间小时门（hour 不匹配 → 绝不发送）');
+  console.log('\n[3] 小时门已移除：发送时间不再受页面 hour 字段影响');
   resetState({ tasks: dueTasks(), cfg: { enabled: true, hour: (beijingHour() + 1) % 24, minute: 0, leadDays: [1, 3, 7] } });
   r = await request(port, 'GET', '/api/cron/reminders', AUTH);
-  check('配置 hour 与当前北京小时不一致 → 跳过', r.body.skipped === true && /未到/.test(r.body.reason || ''), r.body);
-  check('小时门未命中时一封都没发（关键：不能误发）', emailCalls.length === 0, emailCalls.length);
+  check('即便页面配置 hour 与当前北京小时不一致，仍正常发送（success=true）', r.status === 200 && r.body.success === true, r.body);
+  check('仍正确发送 3 封（T1/T2/T3），未因 hour 不一致而误跳过', r.body.sent === 3 && emailCalls.length === 3, r.body);
 
   console.log('\n[4] 邮件总开关门（email_config.enabled=0）');
   resetState({ tasks: dueTasks(), emailEnabled: 0, cfg: { enabled: true, hour: beijingHour(), minute: 0, leadDays: [1, 3, 7] } });

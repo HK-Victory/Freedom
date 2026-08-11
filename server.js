@@ -356,7 +356,7 @@ app.put('/api/email/recipients/:id', requireAuth, asyncHandler(async (req, res) 
   res.json({ success: true });
 }));
 
-// ============ 提醒设置 API（页面可配置定时发送时间 / 提前提醒天数）============
+// ============ 提醒设置 API（提前提醒天数可配置；发送时间由 vercel.json 固定为北京 20:00）============
 
 app.get('/api/settings/reminder', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   res.json(await getReminderSettings());
@@ -447,13 +447,11 @@ app.get('/api/reminders', requireAuth, asyncHandler(async (req, res) => {
   res.json(reminders);
 }));
 
-// ============ 定时提醒（由 GitHub Actions 定时工作流调用，替代 Vercel Cron）============
+// ============ 定时提醒（由 Vercel Cron 每日 20:00 北京时间调用）============
 // 通过 CRON_SECRET 环境变量鉴权，避免被随意调用。
-// 实际发送时间由「提醒设置」页面配置（北京时间 hour），未到时间则跳过。
-function beijingNow() {
-  const d = new Date(Date.now() + 8 * 3600 * 1000); // UTC+8
-  return { h: d.getUTCHours(), m: d.getUTCMinutes() };
-}
+// 发送时间由 vercel.json 的 crons.schedule（0 12 * * * = 北京 20:00）固定，页面不可改；
+// 端点被调用即代表到达发送时刻，不再做「页面配置小时 == 当前北京小时」门禁——
+// 旧门禁在 Vercel Hobby 每日仅一个静态 cron 下是陷阱：改页面时间反而导致提醒永久跳过。
 
 // 定时提醒端点鉴权（Vercel Cron 为主要调度来源，亦支持手动 ?secret= 调用）见 lib/cronAuth.js。
 // 关键：Vercel 配置 CRON_SECRET 后，会在 Authorization 头带【明文】Bearer <CRON_SECRET>，
@@ -466,16 +464,10 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
   if (!cfg.enabled) {
     return res.json({ skipped: true, reason: '提醒未启用（请在「邮件配置-定时提醒设置」中开启）' });
   }
-  const now = beijingNow();
-  if (now.h !== cfg.hour) {
-    // Hobby 套餐每日仅允许一个 cron（vercel.json 的 crons.schedule 为 UTC）。
-    // 若此处频繁跳过，多半是「cron 的 UTC 时间」与「页面配置的北京时间发送小时」不一致，
-    // 需在 vercel.json 把 schedule 改成 (北京时间小时 - 8) 的 UTC 表达。
-    console.warn(`[cron/reminders] 跳过：当前北京时间 ${now.h}:${now.m} ≠ 配置的发送小时 ${cfg.hour}:${cfg.minute}。请确认 vercel.json crons.schedule(UTC) 与页面发送小时(北京时间)一致（默认 20:00 北京 = 12:00 UTC）。`);
-    return res.json({ skipped: true, reason: '未到配置的发送时间', now: `${now.h}:${now.m}`, schedule: `${cfg.hour}:${cfg.minute}` });
-  }
   try {
-    // 定时任务与单次触发共用「临期+逾期」筛选规则；此处尊重当日去重
+    // 仅由 Vercel Cron 每日 20:00（北京）触发一次；到达即代表发送时刻，
+    // 不再做「页面配置小时 == 当前小时」门禁，避免改页面时间后提醒被静默跳过。
+    // 定时任务与单次触发共用「临期+逾期」筛选规则；此处尊重当日去重。
     const r = await checkAndSendReminders({ includeOverdue: true });
     res.json({ success: true, ...r });
   } catch (err) {
@@ -737,11 +729,11 @@ if (require.main === module) {
       console.log(`  访问地址: http://localhost:${PORT}`);
       console.log(`========================================\n`);
       // 本地环境：每 12 小时检查一次倒计时提醒
-      // Vercel 环境由 GitHub Actions 定时工作流调用 /api/cron/reminders 接管
+      // Vercel 环境由 Vercel Cron（vercel.json crons）每日调用 /api/cron/reminders 接管
       setInterval(() => {
         checkAndSendReminders().catch(console.error);
       }, 12 * 60 * 60 * 1000);
-      console.log('[调度器] 本地定时提醒已启动（每12小时），Vercel 环境由 GitHub Actions 定时工作流接管');
+      console.log('[调度器] 本地定时提醒已启动（每12小时），Vercel 环境由 Vercel Cron 接管');
     });
   }).catch(err => {
     console.error('初始化失败:', err);

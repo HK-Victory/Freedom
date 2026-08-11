@@ -92,10 +92,10 @@ SELECT exec_sql('SELECT 1 AS ok', '[]'::jsonb);
 ### 定时提醒的触发链（Vercel Cron）
 - **Vercel Cron**：`vercel.json` 的 `crons` 字段声明 `GET /api/cron/reminders`，**当前为 `0 12 * * *`（每日 12:00 UTC = 北京时间 20:00）**。
 - ⚠️ **Hobby 套餐限制**：Vercel 免费 Hobby 套餐**每个项目每天只允许 1 个 cron 任务**，且 cron 表达式必须「每天最多执行一次」。因此**不能**用 `0 * * * *`（每小时）这类高频表达式，否则 `vercel deploy` 会报 `cron_jobs_limits_reached` 并直接失败。若需更高频/更灵活调度，需升级 Pro 套餐，或恢复 GitHub Actions 工作流兜底。
-- **cron 的 UTC 时间必须与「页面配置的发送小时（北京时间）」对齐**：端点内部按 `北京时间 hour == 配置 hour` 二次放行。默认配置发送小时为 `20`（北京时间 20:00），对应 UTC `12:00`，故 cron 写作 `0 12 * * *`。若你在「邮件配置-定时提醒设置」里改了发送小时，必须**同步**把 `vercel.json` 的 `crons.schedule` 改成 `(北京时间小时 − 8) 的 UTC 表达`（例：想 09:00 北京发送 → `0 1 * * *`）。两端不一致时端点会在日志打 `console.warn` 并跳过，不会静默丢失，但当天就不会发提醒。
+- **cron 的 UTC 时间固定为北京时间 20:00**：`vercel.json` 的 `crons.schedule` 写作 `0 12 * * *`（UTC 12:00 = 北京 20:00）。**发送时间由部署配置固定，页面「定时提醒设置」不再提供修改发送时间的入口**（早期版本曾让页面配置 hour 并要求与 cron 对齐，在 Hobby 每日仅一个静态 cron 下是陷阱：改页面时间会导致提醒被静默跳过，已移除该门禁）。
 - 北京时间为 UTC+8 且**不实行夏令时**，故 UTC 偏移固定为 −8，映射稳定。
 - Vercel 配置 `CRON_SECRET` 后，发起请求时自动在 `Authorization` 头带上明文 `Bearer <CRON_SECRET>`，服务端（`lib/cronAuth.js`）直接比对。
-- 端点被每日调用一次，内部按「北京时间 hour == 配置发送小时」放行，且对当日已发送任务做 `sent=1` 去重，因此**不会重复发送邮件**。
+- 端点被每日调用一次即代表到达发送时刻（不再做小时门禁），对当日已发送任务做 `sent=1` 去重，因此**不会重复发送邮件**。
 - 立即触发（手动补发/测试）：前端「立即触发一次」按钮 → `POST /api/reminders/trigger`（需登录鉴权，带 `force` 可跳过当日去重）。
 
 密钥获取：Supabase 控制台 → **Settings → API** → `Project URL` 与 `Project API keys`。
