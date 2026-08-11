@@ -468,8 +468,10 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
     // 仅由 Vercel Cron 每日 20:00（北京）触发一次；到达即代表发送时刻，
     // 不再做「页面配置小时 == 当前小时」门禁，避免改页面时间后提醒被静默跳过。
     // 定时任务与单次触发共用「临期+逾期」筛选规则；此处尊重当日去重。
-    const r = await checkAndSendReminders({ includeOverdue: true });
-    res.json({ success: true, ...r });
+    // 手动测试/重发可用 ?force=1（同样受 CRON_SECRET 保护），绕过去重、确保点击即重发。
+    const force = req.query.force === '1';
+    const r = await checkAndSendReminders({ includeOverdue: true, force });
+    res.json({ success: true, forced: force, ...r });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

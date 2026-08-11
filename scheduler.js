@@ -68,8 +68,9 @@ async function checkAndSendReminders(options = {}) {
   `).all();
 
   let sentCount = 0;
-  let skipCount = 0;
+  let skipCount = 0;       // 当日已发送（去重）而跳过的条数
   let overdueCount = 0;
+  let notNeededCount = 0;  // 有截止日但不在「临期/逾期」窗口内（含已完成）的条数
 
   // 阶段一：判定需提醒的任务并预写 reminders 记录（快，串行）
   const today = new Date().toISOString().split('T')[0];
@@ -80,7 +81,10 @@ async function checkAndSendReminders(options = {}) {
 
     // 只发送「临期」（今日截止或落在配置的提前天数内）与「已逾期」任务，绝不全量发送。
     // 定时触发与单次触发共用该规则，区别在于 force 是否绕过当日去重。
-    if (!taskNeedsReminder(days, leadDays, includeOverdue)) continue;
+    if (!taskNeedsReminder(days, leadDays, includeOverdue)) {
+      notNeededCount++;
+      continue;
+    }
 
     const alreadySent = await db.prepare(`
       SELECT id FROM reminders
@@ -90,6 +94,7 @@ async function checkAndSendReminders(options = {}) {
     // 定时触发尊重当日去重；单次「立即触发」(force) 绕过去重，确保点击即重发（仍仅限临期+逾期）
     if (!force && alreadySent) {
       skipCount++;
+      console.log(`  ⏭️  ${task.task_id} ${task.name} - 今日已发送，跳过（去重；如需重发用 ?force=1）`);
       continue;
     }
 
@@ -133,8 +138,8 @@ async function checkAndSendReminders(options = {}) {
   const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker());
   await Promise.all(workers);
 
-  console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 跳过${skipCount}条, 无需发送${targets.length}条`);
-  return { sent: sentCount, skipped: skipCount, overdue: overdueCount };
+  console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 今日已发送跳过${skipCount}条, 不在提醒窗口${notNeededCount}条`);
+  return { sent: sentCount, skipped: skipCount, overdue: overdueCount, notNeeded: notNeededCount };
 }
 
 module.exports = { checkAndSendReminders, getDaysUntil, taskNeedsReminder };

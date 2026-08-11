@@ -193,6 +193,16 @@ const dueTasks = () => [
   check('force 重发 sent=3', fr.sent === 3, fr);
   check('force 重发实际又发出 3 封', emailCalls.length === 3, emailCalls.length);
 
+  console.log('\n[7b] HTTP ?force=1 强制重发（供 Vercel 测试按钮之外的手动重发验证）');
+  resetState({ tasks: dueTasks(), cfg: { enabled: true, hour: beijingHour(), minute: 0, leadDays: [1, 3, 7] } });
+  r = await request(port, 'GET', '/api/cron/reminders', AUTH); // 首次：正常发送
+  check('首次触发 sent=3（含逾期 T1）', r.body.sent === 3, r.body);
+  emailCalls = [];
+  r = await request(port, 'GET', '/api/cron/reminders?force=1', AUTH); // 强制重发
+  check('?force=1 绕过当日去重，再次 sent=3', r.body.sent === 3, r.body);
+  check('?force=1 实际又发出 3 封', emailCalls.length === 3, emailCalls.length);
+  check('响应体含 forced=true', r.body.forced === true, r.body);
+
   console.log('\n[8] vercel.json crons 配置校验');
   const vc = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../vercel.json'), 'utf8'));
   check('vercel.json 含 crons 且非空', Array.isArray(vc.crons) && vc.crons.length >= 1, vc.crons);
