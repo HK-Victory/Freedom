@@ -9,6 +9,7 @@
  */
 const { db, getReminderSettings } = require('./db');
 const { sendTaskReminder } = require('./email');
+const { logSystem } = require('./lib/audit');
 
 function getDaysUntil(endDateStr) {
   if (!endDateStr) return null;
@@ -50,9 +51,15 @@ async function checkAndSendReminders(options = {}) {
   const { includeOverdue = true, force = false } = options;
   console.log(`[${new Date().toLocaleString('zh-CN')}] 开始检查任务倒计时提醒...`);
 
+  const startedAt = Date.now();
   const cfg = await db.prepare('SELECT enabled FROM email_config WHERE id = 1').get();
   if (!cfg || !cfg.enabled) {
     console.log('  邮件提醒未启用，跳过');
+    await logSystem({
+      category: 'reminder', action: 'skip', status: 'success',
+      summary: '提醒任务跳过执行：邮件功能未启用',
+      duration_ms: Date.now() - startedAt,
+    });
     return { skipped: true, reason: '邮件提醒未启用（请在「系统设置-邮件配置」中启用并配置SMTP）' };
   }
 
@@ -129,9 +136,21 @@ async function checkAndSendReminders(options = {}) {
           console.log(`  ✅ ${task.task_id} ${task.name} - ${label}提醒已发送`);
         } else {
           console.log(`  ⏭️  ${task.task_id} ${task.name} - 跳过: ${result.reason}`);
+          await logSystem({
+            category: 'reminder', action: 'send', status: 'failure',
+            target_type: 'task', target_id: task.task_id,
+            summary: `提醒邮件未发出（${task.name}）：${result.reason || '未知原因'}`,
+            detail: { days, reason: result.reason },
+          });
         }
       } catch (err) {
         console.error(`  ❌ ${task.task_id} ${task.name} - 发送失败: ${err.message}`);
+        await logSystem({
+          category: 'reminder', action: 'send', status: 'failure',
+          target_type: 'task', target_id: task.task_id,
+          summary: `提醒邮件发送异常（${task.name}）：${err.message}`,
+          detail: { days, error: err.message },
+        });
       }
     }
   }
@@ -139,6 +158,16 @@ async function checkAndSendReminders(options = {}) {
   await Promise.all(workers);
 
   console.log(`  完成: 发送${sentCount}封（其中逾期${overdueCount}封）, 今日已发送跳过${skipCount}条, 不在提醒窗口${notNeededCount}条`);
+
+  // 定时任务「执行日志」：把本次执行的实际结果落库，供审计页复盘
+  //（例如「为什么今天没收到提醒」——一看就知道是当日去重、还是不在提醒窗口、还是发送失败）
+  await logSystem({
+    category: 'reminder', action: 'execute', status: 'success',
+    summary: `提醒任务执行完成：发送 ${sentCount} 封（逾期 ${overdueCount} 封），今日已发送跳过 ${skipCount} 条，不在提醒窗口 ${notNeededCount} 条`,
+    detail: { sent: sentCount, overdue: overdueCount, skipped: skipCount, notNeeded: notNeededCount, leadDays, force, includeOverdue },
+    duration_ms: Date.now() - startedAt,
+  });
+
   return { sent: sentCount, skipped: skipCount, overdue: overdueCount, notNeeded: notNeededCount };
 }
 

@@ -455,6 +455,34 @@ CREATE TABLE IF NOT EXISTS risks (
   trigger TEXT,
   created_at TEXT DEFAULT to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')
 );
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGSERIAL PRIMARY KEY,
+  log_type TEXT NOT NULL DEFAULT 'user',
+  category TEXT,
+  action TEXT,
+  target_type TEXT,
+  target_id TEXT,
+  summary TEXT,
+  detail TEXT,
+  status TEXT DEFAULT 'success',
+  operator TEXT DEFAULT '系统',
+  operator_id BIGINT,
+  operator_role TEXT,
+  ip TEXT,
+  user_agent TEXT,
+  method TEXT,
+  path TEXT,
+  status_code INTEGER,
+  duration_ms INTEGER,
+  created_at TEXT DEFAULT to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_log_type ON audit_logs(log_type);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_category ON audit_logs(category);
 `;
 
 const SCHEMA_SQLITE = `
@@ -572,6 +600,34 @@ CREATE TABLE IF NOT EXISTS risks (
   trigger TEXT,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  log_type TEXT NOT NULL DEFAULT 'user',
+  category TEXT,
+  action TEXT,
+  target_type TEXT,
+  target_id TEXT,
+  summary TEXT,
+  detail TEXT,
+  status TEXT DEFAULT 'success',
+  operator TEXT DEFAULT '系统',
+  operator_id INTEGER,
+  operator_role TEXT,
+  ip TEXT,
+  user_agent TEXT,
+  method TEXT,
+  path TEXT,
+  status_code INTEGER,
+  duration_ms INTEGER,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_log_type ON audit_logs(log_type);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_category ON audit_logs(category);
 `;
 
 // =====================================================================
@@ -593,7 +649,7 @@ async function ensureSchema() {
     s.exec(SCHEMA_SQLITE);
   }
   _schemaReadyFor = drv;
-  console.log('[存储] 表结构已就绪（11 张表，驱动: ' + drv + '）');
+  console.log('[存储] 表结构已就绪（12 张表，驱动: ' + drv + '）');
 }
 
 // =====================================================================
@@ -994,6 +1050,148 @@ async function ensureDefaultReminderSettings() {
 }
 
 // =====================================================================
+//  审计日志（系统日志 + 用户操作日志）
+// =====================================================================
+
+/**
+ * 时间戳统一用「北京时间」字符串写入，不依赖数据库默认值。
+ *
+ * 原因：两种驱动的默认值语义不一致 —— SQLite 是 datetime('now','localtime')（本机时区），
+ * Supabase(Postgres) 是 to_char(NOW(),...)（实例时区，通常 UTC）。审计日志的时间若一会儿
+ * UTC 一会儿本地，排查问题时会误判 8 小时，因此这里在 Node 侧固定折算为北京时间后显式写入。
+ */
+function beijingTimestamp() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+const AUDIT_TEXT_LIMIT = 4000;   // detail 字段上限，防止超长请求体把库撑爆
+
+function truncate(v, max = AUDIT_TEXT_LIMIT) {
+  if (v === null || v === undefined) return null;
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  if (s === undefined) return null;
+  return s.length > max ? s.slice(0, max) + '…(已截断)' : s;
+}
+
+/**
+ * 写入一条审计日志。
+ *
+ * 【契约】本函数永不抛错。审计是旁路能力，绝不能因为日志写失败而让正常业务请求 500。
+ * 失败时只在控制台留痕，返回 false。
+ */
+async function writeAuditLog(entry = {}) {
+  try {
+    await db.prepare(`
+      INSERT INTO audit_logs
+        (log_type, category, action, target_type, target_id, summary, detail, status,
+         operator, operator_id, operator_role, ip, user_agent, method, path, status_code,
+         duration_ms, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      entry.log_type === 'system' ? 'system' : 'user',
+      entry.category || null,
+      entry.action || null,
+      entry.target_type || null,
+      entry.target_id != null ? String(entry.target_id) : null,
+      truncate(entry.summary, 500),
+      truncate(entry.detail),
+      entry.status === 'failure' ? 'failure' : 'success',
+      entry.operator || '系统',
+      entry.operator_id != null ? Number(entry.operator_id) : null,
+      entry.operator_role || null,
+      entry.ip || null,
+      truncate(entry.user_agent, 300),
+      entry.method || null,
+      truncate(entry.path, 300),
+      entry.status_code != null ? Number(entry.status_code) : null,
+      entry.duration_ms != null ? Number(entry.duration_ms) : null,
+      entry.created_at || beijingTimestamp()
+    );
+    return true;
+  } catch (e) {
+    console.error('[审计] 写入失败（已忽略，不影响业务）:', e && e.message ? e.message : e);
+    return false;
+  }
+}
+
+// 把筛选条件编译为 WHERE 子句 + 参数数组，供列表/计数复用，避免两处条件写歪导致分页错乱。
+function buildAuditWhere(f = {}) {
+  const where = [];
+  const params = [];
+  if (f.log_type === 'system' || f.log_type === 'user') {
+    where.push('log_type = ?');
+    params.push(f.log_type);
+  }
+  if (f.category) { where.push('category = ?'); params.push(f.category); }
+  if (f.action) { where.push('action = ?'); params.push(f.action); }
+  if (f.status === 'success' || f.status === 'failure') {
+    where.push('status = ?');
+    params.push(f.status);
+  }
+  if (f.operator) { where.push('operator = ?'); params.push(f.operator); }
+  // 起止日期按 created_at 文本前缀比较（格式固定 'YYYY-MM-DD HH:MM:SS'，字典序即时间序）
+  if (f.date_from) { where.push('created_at >= ?'); params.push(String(f.date_from).slice(0, 10) + ' 00:00:00'); }
+  if (f.date_to) { where.push('created_at <= ?'); params.push(String(f.date_to).slice(0, 10) + ' 23:59:59'); }
+  if (f.keyword) {
+    // 关键字模糊匹配摘要/操作对象/操作者/路径
+    where.push('(summary LIKE ? OR target_id LIKE ? OR operator LIKE ? OR path LIKE ?)');
+    const kw = '%' + f.keyword + '%';
+    params.push(kw, kw, kw, kw);
+  }
+  return { clause: where.length ? ' WHERE ' + where.join(' AND ') : '', params };
+}
+
+async function countAuditLogs(filters = {}) {
+  const { clause, params } = buildAuditWhere(filters);
+  const row = await db.prepare('SELECT COUNT(*) AS total FROM audit_logs' + clause).get(...params);
+  return row ? Number(row.total) || 0 : 0;
+}
+
+/**
+ * 分页查询审计日志。返回 { list, total, page, pageSize }。
+ * 排序固定 created_at DESC, id DESC —— 同秒内多条也能稳定分页（仅按 created_at 排序会翻页错乱）。
+ */
+async function listAuditLogs(filters = {}) {
+  const page = Math.max(1, Number(filters.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(filters.pageSize) || 20));
+  const { clause, params } = buildAuditWhere(filters);
+  const total = await countAuditLogs(filters);
+  const list = await db.prepare(
+    'SELECT * FROM audit_logs' + clause + ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?'
+  ).all(...params, pageSize, (page - 1) * pageSize);
+  return { list: Array.isArray(list) ? list : [], total, page, pageSize };
+}
+
+// 概览统计：供审计页顶部卡片展示（总数/系统/用户/失败/今日）
+async function getAuditLogStats() {
+  const today = beijingTimestamp().slice(0, 10);
+  const row = await db.prepare(
+    'SELECT COUNT(*) AS total, ' +
+    "SUM(CASE WHEN log_type = 'system' THEN 1 ELSE 0 END) AS system_count, " +
+    "SUM(CASE WHEN log_type = 'user' THEN 1 ELSE 0 END) AS user_count, " +
+    "SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure_count, " +
+    'SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS today_count ' +
+    'FROM audit_logs'
+  ).get(today + ' 00:00:00');
+  return {
+    total: Number(row && row.total) || 0,
+    system: Number(row && row.system_count) || 0,
+    user: Number(row && row.user_count) || 0,
+    failure: Number(row && row.failure_count) || 0,
+    today: Number(row && row.today_count) || 0,
+  };
+}
+
+// 按保留天数清理历史日志（管理员手动触发）。返回删除条数。
+async function cleanupAuditLogs(keepDays) {
+  const days = Math.max(0, Number(keepDays) || 0);
+  const cutoffMs = Date.now() + 8 * 3600 * 1000 - days * 86400000;
+  const cutoff = new Date(cutoffMs).toISOString().slice(0, 19).replace('T', ' ');
+  const r = await db.prepare('DELETE FROM audit_logs WHERE created_at < ?').run(cutoff);
+  return { deleted: (r && r.changes) || 0, cutoff };
+}
+
+// =====================================================================
 //  存储状态诊断（供 /api/storage/status 与设置页展示）
 // =====================================================================
 
@@ -1067,6 +1265,12 @@ module.exports = {
   deleteUser,
   init,
   ensureReady,
+  // 审计日志（系统日志 + 用户操作日志）
+  writeAuditLog,
+  listAuditLogs,
+  countAuditLogs,
+  getAuditLogStats,
+  cleanupAuditLogs,
   // 内置种子数据导入（init 内部自动调用；导出仅供回归测试验证幂等性）
   importEmbeddedSeed,
   // 存储彻底不可用时的清晰原因（可用时为 null）

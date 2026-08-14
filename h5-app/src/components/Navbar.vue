@@ -10,6 +10,7 @@
       <a href="#/reports" :class="{ active: active === 'reports' }">报表中心</a>
       <a href="#/settings" :class="{ active: active === 'settings' }">设置</a>
       <a href="#/admin" :class="{ active: active === 'admin' }" v-if="isAdmin">账号管理</a>
+      <a href="#/audit" :class="{ active: active === 'audit' }" v-if="isAdmin">审计日志</a>
       <a href="#" @click.prevent="logout">退出</a>
     </div>
   </nav>

@@ -8,7 +8,8 @@ const routes = [
   { path: '/task/:id', component: () => import('../views/task-detail/index.vue'), meta: { auth: true } },
   { path: '/reports', component: () => import('../views/reports/index.vue'), meta: { auth: true } },
   { path: '/settings', component: () => import('../views/settings/index.vue'), meta: { auth: true } },
-  { path: '/admin', component: () => import('../views/admin/index.vue'), meta: { auth: true, adminOnly: true } }
+  { path: '/admin', component: () => import('../views/admin/index.vue'), meta: { auth: true, adminOnly: true } },
+  { path: '/audit', component: () => import('../views/audit/index.vue'), meta: { auth: true, adminOnly: true } }
 ]
 
 const router = createRouter({

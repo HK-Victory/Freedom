@@ -3,11 +3,12 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady, storageFailure } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady, storageFailure, listAuditLogs, getAuditLogStats, cleanupAuditLogs } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
 const { isCronAuthorized } = require('./lib/cronAuth');
+const { auditMiddleware, logSystem } = require('./lib/audit');
 const { signToken, requireAuth, optionalAuth, requireAdmin } = require('./auth');
 
 const app = express();
@@ -28,6 +29,11 @@ app.use((req, res, next) => {
   if (reason) return res.status(503).json({ error: reason });
   next();
 });
+
+// 审计日志采集：自动记录所有写请求(POST/PUT/PATCH/DELETE)为「用户操作日志」。
+// 必须注册在业务路由之前才能拦截到响应；GET 读请求不记录（无审计价值且会刷爆日志）。
+// 系统日志（定时任务调用/执行）由 lib/audit.js 的 logSystem 在对应逻辑内显式记录。
+app.use(auditMiddleware);
 
 // 文件上传配置
 // 重要：Vercel serverless 的代码目录 (/var/task) 是只读的，不能在代码目录下建 uploads 目录，
@@ -457,11 +463,40 @@ app.get('/api/reminders', requireAuth, asyncHandler(async (req, res) => {
 // 关键：Vercel 配置 CRON_SECRET 后，会在 Authorization 头带【明文】Bearer <CRON_SECRET>，
 // 端点直接比对即可（非 HMAC）；手动/测试也可走 ?secret= 或 x-cron-secret 头。
 app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
+  // 定时任务「调用日志」：无论鉴权成败都留痕。
+  // 失败记录尤其重要——既能发现 CRON_SECRET 配置漂移（定时任务其实一直没跑成），
+  // 也能暴露外部对该端点的探测行为。
+  const startedAt = Date.now();
+  const ua = (req.headers && req.headers['user-agent']) || '';
+  const source = /vercel/i.test(ua) ? 'Vercel Cron' : (req.query.secret ? '手动调用(?secret=)' : '外部调用');
+
   if (!isCronAuthorized(req, process.env.CRON_SECRET)) {
+    await logSystem({
+      category: 'cron', action: 'invoke', status: 'failure',
+      summary: `定时提醒端点被调用但鉴权失败（来源：${source}）`,
+      detail: { user_agent: ua, ip: (req.headers && req.headers['x-forwarded-for']) || null, hasSecretQuery: !!req.query.secret },
+      method: 'GET', path: req.originalUrl, status_code: 401,
+      duration_ms: Date.now() - startedAt,
+    });
     return res.status(401).json({ error: 'unauthorized' });
   }
+
+  await logSystem({
+    category: 'cron', action: 'invoke', status: 'success',
+    summary: `定时提醒任务被触发（来源：${source}${req.query.force === '1' ? '，强制重发' : ''}）`,
+    detail: { user_agent: ua, force: req.query.force === '1' },
+    method: 'GET', path: req.originalUrl, status_code: 200,
+    duration_ms: Date.now() - startedAt,
+  });
+
   const cfg = await getReminderSettings();
   if (!cfg.enabled) {
+    await logSystem({
+      category: 'cron', action: 'skip', status: 'success',
+      summary: '定时提醒任务跳过执行：提醒总开关未启用',
+      method: 'GET', path: req.originalUrl, status_code: 200,
+      duration_ms: Date.now() - startedAt,
+    });
     return res.json({ skipped: true, reason: '提醒未启用（请在「邮件配置-定时提醒设置」中开启）' });
   }
   try {
@@ -473,8 +508,46 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
     const r = await checkAndSendReminders({ includeOverdue: true, force });
     res.json({ success: true, forced: force, ...r });
   } catch (err) {
+    await logSystem({
+      category: 'cron', action: 'execute', status: 'failure',
+      summary: `定时提醒任务执行异常：${err.message}`,
+      detail: { stack: err.stack ? String(err.stack).slice(0, 1500) : null },
+      method: 'GET', path: req.originalUrl, status_code: 500,
+      duration_ms: Date.now() - startedAt,
+    });
     res.status(500).json({ error: err.message });
   }
+}));
+
+// ============ 审计日志 API（仅超管可见）============
+// 权限：requireAuth + requireAdmin —— 普通用户访问返回 403，未登录返回 401。
+// 前端亦有路由守卫与菜单隐藏，但后端才是真正的权限边界（不能只靠前端隐藏）。
+
+app.get('/api/audit-logs', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const { log_type, category, action, status, operator, keyword, date_from, date_to, page, pageSize } = req.query;
+  const result = await listAuditLogs({
+    log_type, category, action, status, operator, keyword, date_from, date_to,
+    page: page ? Number(page) : 1,
+    pageSize: pageSize ? Number(pageSize) : 20,
+  });
+  res.json(result);
+}));
+
+app.get('/api/audit-logs/stats', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  res.json(await getAuditLogStats());
+}));
+
+// 按保留天数清理历史日志（keepDays=0 表示清空全部）
+// keepDays 优先取查询参数（DELETE 请求体在部分 HTTP 客户端/代理下不可靠，查询参数更稳妥且符合 REST 习惯），
+// 同时兼容请求体（body.keepDays）以便浏览器端 axios 直接传 data 也能工作。
+app.delete('/api/audit-logs', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const raw = req.query.keepDays != null ? req.query.keepDays : (req.body && req.body.keepDays);
+  const keepDays = raw != null ? Number(raw) : 90;
+  if (!Number.isFinite(keepDays) || keepDays < 0) {
+    return res.status(400).json({ error: 'keepDays 必须为不小于 0 的数字' });
+  }
+  const r = await cleanupAuditLogs(keepDays);
+  res.json({ success: true, ...r, message: `已清理 ${r.deleted} 条 ${r.cutoff} 之前的日志` });
 }));
 
 // ============ 仪表盘 API ============
