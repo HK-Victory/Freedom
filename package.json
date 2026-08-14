@@ -15,7 +15,8 @@
     "test:cron": "node scripts/test-cron-e2e.js",
     "test:reminder-settings": "node scripts/test-reminder-settings-seed.js",
     "test:reminder": "node scripts/test-cron-auth.js && node scripts/test-reminder-selection.js && node scripts/test-cron-e2e.js && node scripts/test-reminder-settings-seed.js",
-    "test:audit": "node scripts/test-audit.js"
+    "test:audit": "node scripts/test-audit.js",
+    "test:storage": "node scripts/test-storage-mode.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

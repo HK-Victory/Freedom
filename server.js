@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
-const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady, storageFailure, listAuditLogs, getAuditLogStats, cleanupAuditLogs } = require('./db');
+const { db, getEmailConfig, upsertEmailConfig, getReminderSettings, setReminderSettings, getStorageStatus, getStorageMode, applyStorageMode, getLastSave, initDefaultAdmin, getUserByUsername, listUsers, createUser, updateUser, deleteUser, ensureReady, storageFailure, listAuditLogs, getAuditLogStats, cleanupAuditLogs } = require('./db');
 const { syncExcel, resetAndSync } = require('./excel-reader');
 const { sendTestEmail, sendTaskReminder } = require('./email');
 const { checkAndSendReminders, getDaysUntil } = require('./scheduler');
@@ -393,6 +393,27 @@ app.post('/api/storage/save', requireAuth, requireAdmin, asyncHandler(async (req
     res.json({ success: true, ...(await getStorageStatus()) });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+}));
+
+// ============ 存储模式设置（仅超管）============
+// 让管理员在设置页面切换数据库驱动：auto（自动，推荐）/ postgres（仅云库）/ offline（本地 SQLite）。
+// 优先级：FREEDOM_OFFLINE 环境变量 > 本设置 > 自动。云库在线时可在页面预先切到离线验证。
+app.get('/api/settings/storage', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    res.json(await getStorageStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}));
+
+app.put('/api/settings/storage', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    const mode = (req.body && req.body.mode) || 'auto';
+    const status = await applyStorageMode(mode);
+    res.json({ success: true, mode, ...status });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 }));
 

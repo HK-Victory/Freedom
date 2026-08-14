@@ -842,17 +842,11 @@ let _readyPromise = null;
 async function init() {
   if (_readyPromise) return _readyPromise;
   _readyPromise = (async () => {
-    // ── 模式一：显式离线开关（FREEDOM_OFFLINE=1）──
-    // 云平台（Supabase）到期后以此方式离线运行：强制本地 SQLite，绝不连接网络。
+    // ── 模式一：显式离线开关（FREEDOM_OFFLINE=1）── 最高优先级，强制本地 SQLite，绝不联网
     if (FREEDOM_OFFLINE) {
       console.log('[存储] 离线模式（FREEDOM_OFFLINE=1）：使用本地 SQLite，忽略 Supabase 配置');
-      DRIVER = 'sqlite';
       try {
-        await ensureSchema();
-        await ensureDefaultReminderSettings();
-        try { await importEmbeddedSeed(); }
-        catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
-        await initDefaultAdmin();
+        await finalizeDriver('sqlite');
         console.log('[存储] 离线模式已就绪（本地 SQLite，数据仅进程内）');
       } catch (e) {
         _sqliteError = e && e.message ? e.message : String(e);
@@ -861,74 +855,33 @@ async function init() {
       return;
     }
 
-    // ── 模式二：已配置 Supabase → 只用 Postgres ──
-    if (SUPABASE_CONFIGURED) {
-      try {
-        const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
-        if (e2) throw new Error((e2 && e2.message) || JSON.stringify(e2));
-        if (!Array.isArray(d2) || d2.length === 0) throw new Error('exec_sql 返回空，连接可能异常');
-        try {
-          await assertExecSqlNotStale();
-        } catch (staleErr) {
-          // 探测到旧版有 bug 的 exec_sql：尝试用（可能已坏的）exec_sql 空参数重装正确本体自愈，
-          // 成功则继续走 Supabase；失败则按需求「只用 Postgres」判定存储不可用（不再降级 SQLite）。
-          if (!_healAttempted) {
-            try {
-              await reinstallExecSql();
-              await assertExecSqlNotStale();   // 重装后必须重新探测确认
-              console.log('[存储] ✅ 已自动重装 exec_sql 函数（修复旧版 $数字 二次替换 bug），继续走 Supabase');
-            } catch (healErr) {
-              console.error('[存储] ⚠️ 自动重装 exec_sql 失败:', (healErr && healErr.message) || healErr);
-              throw staleErr;
-            }
-          } else {
-            throw staleErr;
-          }
-        }
-        DRIVER = 'supabase';
-        await ensureSchema();
-        await ensureDefaultReminderSettings();
-        // 种子导入放在建管理员之前：种子里自带 admin（密码同为 admin123）与其它用户，
-        // 先导入可保留原始账号信息，initDefaultAdmin 届时发现 admin 已存在会自动跳过。
-        try { await importEmbeddedSeed(); }
-        catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
-        await initDefaultAdmin();
-        console.log('[存储] 已连接 Supabase（Postgres，via exec_sql RPC）');
-        return;
-      } catch (e) {
-        let msg = e && e.message ? e.message : String(e);
-        // 把「函数不存在」这类底层报错翻译成可操作的指引：
-        // 变量都配对了但没建 RPC 是最常见的部署遗漏，原始报错完全看不出该做什么。
-        if (/schema cache|could not find the function|function .*exec_sql.* does not exist/i.test(msg)) {
-          msg = 'Supabase 尚未创建 exec_sql 函数（' + msg + '）。'
-              + '请在 Supabase 控制台 SQL Editor 执行一次 scripts/exec_sql.sql，'
-              + '其中末尾的 NOTIFY pgrst 用于刷新 PostgREST schema 缓存，务必一并执行。';
-        } else if (/Invalid API key|JWT|401|apikey/i.test(msg)) {
-          msg = 'Supabase 密钥无效或已轮换（' + msg + '）。'
-              + '请核对 SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY 与 SUPABASE_URL 是否属于同一个项目。';
-        }
-        // 严格「只用 Postgres」：配置存在但连不上时【不再静默降级 SQLite】，
-        // 明确记录失败原因，由 storageFailure() 向用户报清晰错误。
-        // 需要离线运行时，请设置 FREEDOM_OFFLINE=1 重启进入离线模式。
-        console.error('[存储] ✗ Supabase(Postgres) 连接/初始化失败，未启用离线兜底（如需离线请设 FREEDOM_OFFLINE=1）:', msg);
-        _supabaseError = msg;
-        return;
-      }
-    }
-
-    // ── 模式三：未配置 Supabase 且非离线模式 → 本地 SQLite（本地开发/单机部署）──
-    // 注意：这里【绝不允许抛异常】。init() 由 api/index.js 在每个请求前 await，
-    // 一旦抛出会让所有接口（含 /api/health）都变成 500，反而看不到真正的失败原因。
-    DRIVER = 'sqlite';
+    // ── 模式二/三：未开离线开关 ──
+    // 先以「基础驱动」承载 settings 表（Supabase 配了用 postgres，否则 sqlite），
+    // 完成初始化后读取用户在设置页保存的 storage_mode，再决定最终驱动。
+    const base = baseDriver();
     try {
-      await ensureSchema();
-      await ensureDefaultReminderSettings();
-      // 兜底库每次冷启动都是空的，必须重新灌入内置数据，否则用户登录进去一片空白
-      try { await importEmbeddedSeed(); }
-      catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
-      await initDefaultAdmin();
-      console.log('[存储] 使用本地 SQLite（未配置 Supabase，离线/本地模式，数据仅进程内）');
+      if (base === 'supabase') await connectSupabase();
+      await finalizeDriver(base);
+
+      // settings 表已就绪，读取用户持久化偏好
+      const mode = await getStorageMode();
+      if (mode === 'offline' && base === 'supabase') {
+        // 云库在线但用户选了离线 → 切换至本地 SQLite（常见场景：云到期前先验证离线能力）
+        console.log('[存储] 检测到 storage_mode=offline，从 Postgres 切换至本地 SQLite 离线运行');
+        try { await finalizeDriver('sqlite'); }
+        catch (e) { _sqliteError = e && e.message ? e.message : String(e); console.error('[存储] ✗ 切换离线 SQLite 失败:', _sqliteError); }
+      } else if (mode === 'postgres' && base === 'sqlite') {
+        // 用户选了「仅 Postgres」但运行时未配置 Supabase → 无法满足，保持本地 SQLite 并提示
+        console.warn('[存储] storage_mode=postgres 但运行时未配置 Supabase，回退本地 SQLite');
+      }
+      console.log(`[存储] 初始化完成：driver=${DRIVER}，storage_mode=${mode}`);
+      return;
     } catch (e) {
+      if (base === 'supabase') {
+        // 严格「只用 Postgres」：配置存在但连不上 → 明确报错，不静默降级 SQLite
+        console.error('[存储] ✗ Supabase(Postgres) 连接/初始化失败，未启用离线兜底（如需离线请设 FREEDOM_OFFLINE=1）:', e.message);
+        return; // _supabaseError 已记录，storageFailure() 会报清晰错误
+      }
       _sqliteError = e && e.message ? e.message : String(e);
       console.error('[存储] ✗ SQLite 初始化失败:', _sqliteError);
       // 不 rethrow：让 /api/health 等诊断接口仍可用，业务接口再按 storageFailure() 报清晰错误
@@ -1066,6 +1019,104 @@ async function setReminderSettings(s) {
     ? s.leadDays.map(Number).filter(n => Number.isFinite(n) && n >= 0)
     : [1, 3, 7];
   await setSetting('reminder_lead_days', JSON.stringify(days.length ? days : [1, 3, 7]));
+}
+
+// =====================================================================
+//  存储模式（设置页可配置：auto / postgres / offline）
+// =====================================================================
+// 解析优先级：FREEDOM_OFFLINE 环境变量 > settings 表的 storage_mode > 自动（Supabase 配了则用，否则 SQLite）
+// 这样既能通过页面让管理员在「云库在线」时预先切到离线验证，又保留 env 硬开关用于云平台到期后离线。
+const VALID_STORAGE_MODES = ['auto', 'postgres', 'offline'];
+
+// 基础驱动：已配 Supabase 用 postgres，否则 sqlite（尚未读取用户持久化偏好时使用）
+function baseDriver() {
+  return SUPABASE_CONFIGURED ? 'supabase' : 'sqlite';
+}
+
+async function getStorageMode() {
+  try {
+    const v = await getSetting('storage_mode', 'auto');
+    return VALID_STORAGE_MODES.includes(v) ? v : 'auto';
+  } catch (e) { return 'auto'; }
+}
+
+async function setStorageMode(mode) {
+  if (!VALID_STORAGE_MODES.includes(mode)) mode = 'auto';
+  await setSetting('storage_mode', mode);
+}
+
+// 在「已连上某驱动」后，把该驱动的收尾初始化做完（建表/默认提醒设置/种子/默认超管）。
+// 与 init 三模式里的收尾逻辑完全一致，可重复调用（种子与建管均幂等）。
+async function finalizeDriver(driver) {
+  DRIVER = driver;
+  await ensureSchema();
+  await ensureDefaultReminderSettings();
+  try { await importEmbeddedSeed(); }
+  catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
+  await initDefaultAdmin();
+}
+
+// 探活 Supabase（含 exec_sql 可用性与旧版自愈）；失败抛带友好文案的错误并写 _supabaseError。
+async function connectSupabase() {
+  try {
+    const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
+    if (e2) throw new Error((e2 && e2.message) || JSON.stringify(e2));
+    if (!Array.isArray(d2) || d2.length === 0) throw new Error('exec_sql 返回空，连接可能异常');
+    try {
+      await assertExecSqlNotStale();
+    } catch (staleErr) {
+      if (!_healAttempted) {
+        try {
+          await reinstallExecSql();
+          await assertExecSqlNotStale();
+          console.log('[存储] ✅ 已自动重装 exec_sql 函数（修复旧版 $数字 二次替换 bug），继续走 Supabase');
+        } catch (healErr) {
+          console.error('[存储] ⚠️ 自动重装 exec_sql 失败:', (healErr && healErr.message) || healErr);
+          throw staleErr;
+        }
+      } else {
+        throw staleErr;
+      }
+    }
+  } catch (e) {
+    let msg = e && e.message ? e.message : String(e);
+    if (/schema cache|could not find the function|function .*exec_sql.* does not exist/i.test(msg)) {
+      msg = 'Supabase 尚未创建 exec_sql 函数（' + msg + '）。'
+        + '请在 Supabase 控制台 SQL Editor 执行 scripts/exec_sql.sql，'
+        + '其中末尾的 NOTIFY pgrst 用于刷新 PostgREST schema 缓存，务必一并执行。';
+    } else if (/Invalid API key|JWT|401|apikey/i.test(msg)) {
+      msg = 'Supabase 密钥无效或已轮换（' + msg + '）。'
+        + '请核对 SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY 与 SUPABASE_URL 是否属于同一个项目。';
+    }
+    _supabaseError = msg;
+    throw new Error(msg);
+  }
+}
+
+// 运行时切换存储模式（设置页「保存」调用）。先切驱动再持久化偏好；任一环节失败则抛错，偏好不变。
+async function applyStorageMode(mode) {
+  if (!VALID_STORAGE_MODES.includes(mode)) throw new Error('无效的存储模式：' + mode);
+
+  let target;
+  if (mode === 'offline') target = 'sqlite';
+  else if (mode === 'postgres') {
+    if (!SUPABASE_CONFIGURED) throw new Error('未配置 Supabase（SUPABASE_URL / SUPABASE_ANON_KEY），无法切换到 Postgres 模式');
+    target = 'supabase';
+  } else {
+    target = baseDriver();
+  }
+
+  // 离线开关是硬覆盖：已开启 FREEDOM_OFFLINE 时不许切回联网的 Postgres
+  if (FREEDOM_OFFLINE && target !== 'sqlite') {
+    throw new Error('当前为 FREEDOM_OFFLINE=1 强制离线模式，无法切换到联网的 Postgres；请先移除该环境变量并重启');
+  }
+
+  if (target !== DRIVER) {
+    if (target === 'supabase') await connectSupabase();
+    await finalizeDriver(target);
+  }
+  await setStorageMode(mode);
+  return getStorageStatus();
 }
 
 // 初始化时把「提醒设置」的默认配置写入 settings 表。
@@ -1246,9 +1297,13 @@ async function getStorageStatus() {
   } catch (e) { /* ignore */ }
 
   const driver = DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite');
+  const mode = await getStorageMode();
   return {
     driver,
+    mode,
     offline: FREEDOM_OFFLINE,
+    envOverride: FREEDOM_OFFLINE,
+    supabaseConfigured: SUPABASE_CONFIGURED,
     loadSource: driver,
     supabase: {
       urlConfigured: !!SUPABASE_URL,
@@ -1296,6 +1351,9 @@ module.exports = {
   setReminderSettings,
   ensureDefaultReminderSettings,
   getStorageStatus,
+  getStorageMode,
+  setStorageMode,
+  applyStorageMode,
   initDefaultAdmin: initDefaultAdminExport,
   getUserById,
   getUserByUsername,

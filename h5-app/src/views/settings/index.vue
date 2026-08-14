@@ -206,7 +206,43 @@
             <input v-model="pwdForm.new_password" type="password" class="form-input" />
           </div>
           <button class="btn btn-primary btn-block" @click="changePassword">修改密码</button>
-          <p v-if="pwdMsg" class="text-muted text-xs mt-8">{{ pwdMsg }}</p>
+      <p v-if="pwdMsg" class="text-muted text-xs mt-8">{{ pwdMsg }}</p>
+      </section>
+      </div>
+
+      <!-- 数据库 / 存储模式（仅超管可见） -->
+      <div class="settings-grid mt-16" v-if="user?.role === 'admin'">
+        <section class="card span-2">
+          <header class="card-head">
+            <span class="card-icon icon-blue">🗄️</span>
+            <h2 class="card-title">数据库 / 存储模式</h2>
+          </header>
+          <p class="text-muted text-sm mb-12">选择系统使用的数据库驱动，可在「云库在线」时预先切到离线验证。仅管理员可配置，普通用户不可见。</p>
+          <div class="storage-current mb-12" v-if="status && status.driver">
+            <span class="badge" :class="status.driver === 'supabase' ? 'badge-completed' : 'badge-pending'">
+              当前驱动：{{ status.driver === 'supabase' ? 'Postgres（云库）' : 'SQLite（本地）' }}
+            </span>
+            <span class="badge" :class="status.mode === 'offline' ? 'badge-pending' : 'badge-completed'">模式：{{ modeLabel(status.mode) }}</span>
+            <span class="badge" v-if="status.envOverride" style="background: rgba(239,68,68,0.16); color:#f87171">FREEDOM_OFFLINE 强制离线</span>
+            <span class="badge" v-else-if="status.supabaseConfigured" style="background: rgba(59,130,246,0.14)">已配置 Supabase</span>
+            <span class="badge" v-else style="background: rgba(34,197,94,0.14)">未配置 Supabase</span>
+          </div>
+          <div class="form-group">
+            <label>存储模式</label>
+            <select v-model="storageMode" class="form-select">
+              <option value="auto">自动（推荐：配了云库用 Postgres，否则本地 SQLite）</option>
+              <option value="postgres">仅 Postgres（云库）</option>
+              <option value="offline">离线（本地 SQLite）</option>
+            </select>
+          </div>
+          <p class="text-muted text-xs mt-8" v-if="storageMode === 'offline'">
+            离线模式数据仅进程内，Vercel 冷启动不持久；云平台到期后也可直接设置环境变量 <code>FREEDOM_OFFLINE=1</code> 强制离线。
+          </p>
+          <div class="flex gap-8 mt-12">
+            <button class="btn btn-primary" @click="saveStorage" :disabled="savingStorage">{{ savingStorage ? '保存中…' : '保存存储模式' }}</button>
+            <button class="btn btn-secondary" @click="loadStorage">刷新状态</button>
+          </div>
+          <p v-if="storageMsg" class="text-muted text-xs mt-8">{{ storageMsg }}</p>
         </section>
       </div>
 
@@ -398,11 +434,45 @@ const triggerReminder = async () => {
   }
 }
 
+// 数据库 / 存储模式（仅超管）
+const storageMode = ref('auto')
+const status = ref({ driver: '', mode: 'auto', offline: false, envOverride: false, supabaseConfigured: false })
+const savingStorage = ref(false)
+const storageMsg = ref('')
+const modeLabel = (m) => ({ auto: '自动', postgres: '仅 Postgres', offline: '离线 SQLite' }[m] || m)
+
+const loadStorage = async () => {
+  storageMsg.value = ''
+  try {
+    const s = await request.get('/settings/storage')
+    status.value = s
+    storageMode.value = s.mode || 'auto'
+  } catch (err) {}
+}
+
+const saveStorage = async () => {
+  if (savingStorage.value) return
+  savingStorage.value = true
+  storageMsg.value = ''
+  try {
+    const r = await request.put('/settings/storage', { mode: storageMode.value })
+    status.value = r
+    storageMode.value = r.mode || storageMode.value
+    storageMsg.value = '存储模式已保存：' + modeLabel(r.mode || storageMode.value)
+  } catch (err) {
+    storageMsg.value = '保存失败：' + (err.error || err.message || '')
+  } finally {
+    savingStorage.value = false
+    setTimeout(() => { storageMsg.value = '' }, 4000)
+  }
+}
+
 
 onMounted(() => {
   loadConfig()
   loadRecipients()
   loadReminder()
+  loadStorage()
 })
 </script>
 
@@ -464,6 +534,13 @@ onMounted(() => {
 .align-center { align-items: center; }
 .flex-wrap { flex-wrap: wrap; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
+
+/* 存储模式卡片 */
+.storage-current { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-current .badge { font-size: 12px; }
+code { background: rgba(128, 128, 128, 0.18); padding: 1px 5px; border-radius: 4px; font-size: 12px; color: var(--text); }
+.mb-12 { margin-bottom: 12px; }
+.mt-12 { margin-top: 12px; }
 
 
 /* 主题颜色选择 */
