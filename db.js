@@ -8,8 +8,9 @@
  *      ① Supabase 驱动：经 @supabase/supabase-js（HTTPS 443）调用 Supabase 上的
  *         exec_sql RPC（见 scripts/exec_sql.sql），绕开 db.*.supabase.co 直连主机无法公网解析的问题，
  *         且天然多实例共享同一数据源，根治「多实例内存库互相覆盖 / 重部署假丢失」顽疾。
- *      ② SQLite 驱动：sql.js（浏览器/Node 可用的 WASM SQLite），作为离线/兜底。
- *         未配置 Supabase 或连接失败时自动降级，保证应用始终能跑起来（数据仅进程内，重启不持久）。
+ *      ② SQLite 驱动：sql.js（浏览器/Node 可用的 WASM SQLite），作为【离线模式】。
+ *         仅当「未配置 Supabase」或「显式设置 FREEDOM_OFFLINE=1」时使用；
+ *         Postgres 已配置但连接失败时【不再静默降级】，而是明确报错，需手动开启离线开关。
  *   - 方言策略：业务代码统一写 SQLite 风格 SQL；Supabase 模式下由「翻译层」转成 Postgres；
  *     SQLite 模式直接原生执行。这样同一份 SQL 在两种数据库都能跑。
  *
@@ -18,7 +19,10 @@
  *   SUPABASE_SERVICE_ROLE_KEY —— 服务角色密钥（Settings → API → service_role），拥有建表/读写全表权限（推荐）
  *   SUPABASE_ANON_KEY         —— 匿名密钥（用户最初提供）；后端仅在无 service_role 时回退使用，
  *                                exec_sql 已授权 anon，但密钥仅应留在服务端，切勿下发到前端。
- *   未配置以上任意一项 → 自动使用本地 SQLite 兜底。
+ *   FREEDOM_OFFLINE=1         —— 显式离线开关；设置后强制使用本地 SQLite（云平台到期后的离线运行方式），
+ *                                即使已配置 Supabase 也会忽略云端、改用本地库，绝不连接网络。
+ *   未配置 SUPABASE_* 且未设 FREEDOM_OFFLINE → 自动使用本地 SQLite（本地开发/单机部署）。
+ *   已配置 SUPABASE_* 但连接失败 → 明确报错，不再静默降级；需离线时设 FREEDOM_OFFLINE=1 重启。
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -44,10 +48,13 @@ const envStr = (...names) => {
 const SUPABASE_URL = envStr('SUPABASE_URL');
 const SUPABASE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', 'SUPABASE_KEY');
 const SUPABASE_CONFIGURED = !!(SUPABASE_URL && SUPABASE_KEY);
+// 显式离线开关：设置后强制使用本地 SQLite，云平台（Supabase）到期后以此方式离线运行。
+// 即使已配置 Supabase，开启此开关也会忽略云端、改用本地库，绝不连接网络。
+const FREEDOM_OFFLINE = !!envStr('FREEDOM_OFFLINE');
 
 let DRIVER = null;            // 'supabase' | 'sqlite'（init 后确定）
-let _supabaseError = null;    // supabase 连接/exec_sql 失败原因（降级时记录）
-let _sqliteError = null;      // SQLite 兜底自身也起不来的原因（如 wasm 未打包）
+let _supabaseError = null;    // supabase 连接/exec_sql 失败原因（配置存在但连不上时记录）
+let _sqliteError = null;      // SQLite 初始化失败原因（如 wasm 未打包）
 
 // ===================== Supabase 客户端（懒加载）=====================
 let _sb = null;
@@ -109,6 +116,8 @@ async function getSqlite() {
 
 function activeDriver() {
   if (DRIVER) return DRIVER;
+  // 离线开关优先：显式声明用本地库，绝不去连 Supabase
+  if (FREEDOM_OFFLINE) return 'sqlite';
   return SUPABASE_CONFIGURED ? 'supabase' : 'sqlite';
 }
 
@@ -833,7 +842,26 @@ let _readyPromise = null;
 async function init() {
   if (_readyPromise) return _readyPromise;
   _readyPromise = (async () => {
-    // 优先 Supabase；配置齐全则探活 + 确认 exec_sql 可用
+    // ── 模式一：显式离线开关（FREEDOM_OFFLINE=1）──
+    // 云平台（Supabase）到期后以此方式离线运行：强制本地 SQLite，绝不连接网络。
+    if (FREEDOM_OFFLINE) {
+      console.log('[存储] 离线模式（FREEDOM_OFFLINE=1）：使用本地 SQLite，忽略 Supabase 配置');
+      DRIVER = 'sqlite';
+      try {
+        await ensureSchema();
+        await ensureDefaultReminderSettings();
+        try { await importEmbeddedSeed(); }
+        catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
+        await initDefaultAdmin();
+        console.log('[存储] 离线模式已就绪（本地 SQLite，数据仅进程内）');
+      } catch (e) {
+        _sqliteError = e && e.message ? e.message : String(e);
+        console.error('[存储] ✗ 离线 SQLite 初始化失败:', _sqliteError);
+      }
+      return;
+    }
+
+    // ── 模式二：已配置 Supabase → 只用 Postgres ──
     if (SUPABASE_CONFIGURED) {
       try {
         const { data: d2, error: e2 } = await getSupabase().rpc('exec_sql', { sql: 'SELECT 1', params: [] });
@@ -843,14 +871,14 @@ async function init() {
           await assertExecSqlNotStale();
         } catch (staleErr) {
           // 探测到旧版有 bug 的 exec_sql：尝试用（可能已坏的）exec_sql 空参数重装正确本体自愈，
-          // 成功则继续走 Supabase；否则按原逻辑降级 SQLite。每个进程只尝试一次，避免死循环。
+          // 成功则继续走 Supabase；失败则按需求「只用 Postgres」判定存储不可用（不再降级 SQLite）。
           if (!_healAttempted) {
             try {
               await reinstallExecSql();
               await assertExecSqlNotStale();   // 重装后必须重新探测确认
               console.log('[存储] ✅ 已自动重装 exec_sql 函数（修复旧版 $数字 二次替换 bug），继续走 Supabase');
             } catch (healErr) {
-              console.error('[存储] ⚠️ 自动重装 exec_sql 失败，维持降级:', (healErr && healErr.message) || healErr);
+              console.error('[存储] ⚠️ 自动重装 exec_sql 失败:', (healErr && healErr.message) || healErr);
               throw staleErr;
             }
           } else {
@@ -859,15 +887,13 @@ async function init() {
         }
         DRIVER = 'supabase';
         await ensureSchema();
-        // 保证提醒相关默认配置落到 settings 表（仅缺省时写入，不覆盖用户已保存值）
         await ensureDefaultReminderSettings();
         // 种子导入放在建管理员之前：种子里自带 admin（密码同为 admin123）与其它用户，
         // 先导入可保留原始账号信息，initDefaultAdmin 届时发现 admin 已存在会自动跳过。
-        // 单独兜异常——灌数据失败属于「数据不全」，不该升级成「连接失败」把整个驱动拖去降级。
         try { await importEmbeddedSeed(); }
         catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
         await initDefaultAdmin();
-        console.log('[存储] 已连接 Supabase（JS 客户端 via exec_sql RPC）');
+        console.log('[存储] 已连接 Supabase（Postgres，via exec_sql RPC）');
         return;
       } catch (e) {
         let msg = e && e.message ? e.message : String(e);
@@ -881,27 +907,30 @@ async function init() {
           msg = 'Supabase 密钥无效或已轮换（' + msg + '）。'
               + '请核对 SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY 与 SUPABASE_URL 是否属于同一个项目。';
         }
-        console.error('[存储] ⚠️ Supabase 连接/exec_sql 失败，降级到本地 SQLite 兜底:', msg);
+        // 严格「只用 Postgres」：配置存在但连不上时【不再静默降级 SQLite】，
+        // 明确记录失败原因，由 storageFailure() 向用户报清晰错误。
+        // 需要离线运行时，请设置 FREEDOM_OFFLINE=1 重启进入离线模式。
+        console.error('[存储] ✗ Supabase(Postgres) 连接/初始化失败，未启用离线兜底（如需离线请设 FREEDOM_OFFLINE=1）:', msg);
         _supabaseError = msg;
-        // 继续走 sqlite 兜底
+        return;
       }
     }
-    // SQLite 离线/兜底
+
+    // ── 模式三：未配置 Supabase 且非离线模式 → 本地 SQLite（本地开发/单机部署）──
     // 注意：这里【绝不允许抛异常】。init() 由 api/index.js 在每个请求前 await，
     // 一旦抛出会让所有接口（含 /api/health）都变成 500，反而看不到真正的失败原因。
     DRIVER = 'sqlite';
     try {
       await ensureSchema();
-      // 保证提醒相关默认配置落到 settings 表（仅缺省时写入，不覆盖用户已保存值）
       await ensureDefaultReminderSettings();
       // 兜底库每次冷启动都是空的，必须重新灌入内置数据，否则用户登录进去一片空白
       try { await importEmbeddedSeed(); }
       catch (e) { console.warn('[种子] 导入内置数据失败（不影响服务）:', e && e.message); }
       await initDefaultAdmin();
-      console.log('[存储] 使用本地 SQLite 兜底（数据仅进程内，Vercel 冷启动/重启不持久）');
+      console.log('[存储] 使用本地 SQLite（未配置 Supabase，离线/本地模式，数据仅进程内）');
     } catch (e) {
       _sqliteError = e && e.message ? e.message : String(e);
-      console.error('[存储] ✗ SQLite 兜底也初始化失败:', _sqliteError);
+      console.error('[存储] ✗ SQLite 初始化失败:', _sqliteError);
       // 不 rethrow：让 /api/health 等诊断接口仍可用，业务接口再按 storageFailure() 报清晰错误
     }
   })();
@@ -913,13 +942,23 @@ async function init() {
  * 用于替代「sql.js wasm ENOENT」这类会误导人的底层报错。
  */
 function storageFailure() {
-  if (!_sqliteError) return null;
-  if (SUPABASE_CONFIGURED) {
-    return '数据库不可用。Supabase 连接失败：' + (_supabaseError || '未知原因') +
-      '；SQLite 兜底同样失败：' + _sqliteError +
-      '。请确认已在 Supabase SQL Editor 执行 scripts/exec_sql.sql 创建 exec_sql 函数，并检查 SUPABASE_URL / SUPABASE_ANON_KEY 是否已注入运行时。';
+  // 离线模式或未配置 Supabase：仅当本地 SQLite 自身起不来才算存储不可用
+  if (FREEDOM_OFFLINE || !SUPABASE_CONFIGURED) {
+    if (_sqliteError) {
+      return '数据库不可用（离线/本地模式 SQLite 初始化失败）：' + _sqliteError;
+    }
+    return null;
   }
-  return '数据库不可用：未配置 SUPABASE_URL / SUPABASE_ANON_KEY，且 SQLite 兜底初始化失败：' + _sqliteError;
+  // 已配置 Supabase：「只用 Postgres」——配置存在但连不上即判定存储不可用，绝不静默回退
+  if (_supabaseError) {
+    return '数据库不可用。已配置 Supabase(Postgres) 但连接/初始化失败：' + _supabaseError +
+      '。本系统已设为「仅用 Postgres」，不会静默降级到易丢数据的 SQLite。' +
+      '如需离线运行，请设置环境变量 FREEDOM_OFFLINE=1 并重启（将改用本地 SQLite）。';
+  }
+  if (_sqliteError) {
+    return '数据库不可用：本地 SQLite 兜底初始化失败：' + _sqliteError;
+  }
+  return null;
 }
 
 function ensureReady() {
@@ -1209,6 +1248,7 @@ async function getStorageStatus() {
   const driver = DRIVER || (SUPABASE_CONFIGURED ? 'supabase' : 'sqlite');
   return {
     driver,
+    offline: FREEDOM_OFFLINE,
     loadSource: driver,
     supabase: {
       urlConfigured: !!SUPABASE_URL,
