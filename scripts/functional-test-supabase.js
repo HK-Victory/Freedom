@@ -337,7 +337,7 @@ async function api(inst, method, url, opts = {}) {
     section('8. 提醒设置（settings 表无 id 列 —— 验证 RETURNING id 修复）');
     // ============================================================
     r = await api(A, 'GET', '/api/settings/reminder', { token: tokenAdmin });
-    check('默认提醒时间为 20:00', r.status === 200 && r.data.hour === 20 && r.data.minute === 0,
+    check('默认提醒时间为 18:00', r.status === 200 && r.data.hour === 18 && r.data.minute === 0,
       JSON.stringify(r.data));
     check('默认提前提醒天数 [1,3,7]', JSON.stringify(r.data.leadDays) === '[1,3,7]');
     check('默认未启用', r.data.enabled === false);
@@ -354,10 +354,10 @@ async function api(inst, method, url, opts = {}) {
       && JSON.stringify(r.data.leadDays) === '[2,5]', JSON.stringify(r.data));
 
     r = await api(B, 'PUT', '/api/settings/reminder', {
-      token: tokenAdmin, body: { enabled: false, hour: 20, minute: 0, leadDays: [1, 3, 7] }
+      token: tokenAdmin, body: { enabled: false, hour: 18, minute: 0, leadDays: [1, 3, 7] }
     });
     r = await api(A, 'GET', '/api/settings/reminder', { token: tokenAdmin });
-    check('二次保存走 ON CONFLICT DO UPDATE（可反复覆盖）', r.data.hour === 20 && r.data.enabled === false);
+    check('二次保存走 ON CONFLICT DO UPDATE（可反复覆盖）', r.data.hour === 18 && r.data.enabled === false);
 
     // ============================================================
     section('9. 邮件配置与收件人');

@@ -998,8 +998,8 @@ async function setSetting(key, value) {
 
 async function getReminderSettings() {
   const enabled = (await getSetting('reminder_enabled', '0')) === '1';
-  let hour = parseInt(await getSetting('reminder_hour', '20'), 10);
-  if (isNaN(hour) || hour < 0 || hour > 23) hour = 20;
+  let hour = parseInt(await getSetting('reminder_hour', '18'), 10);
+  if (isNaN(hour) || hour < 0 || hour > 23) hour = 18;
   let minute = parseInt(await getSetting('reminder_minute', '0'), 10);
   if (isNaN(minute) || minute < 0 || minute > 59) minute = 0;
   let leadDays;
@@ -1126,7 +1126,7 @@ async function applyStorageMode(mode) {
 // 可直接查证是否落库（解决「提前提醒天数配置没有落到数据库中」的排查困惑）。
 const DEFAULT_REMINDER_SETTINGS = [
   ['reminder_enabled', '0'],
-  ['reminder_hour', '20'],
+  ['reminder_hour', '18'],
   ['reminder_minute', '0'],
   ['reminder_lead_days', JSON.stringify([1, 3, 7])],
 ];

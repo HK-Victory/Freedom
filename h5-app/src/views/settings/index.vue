@@ -161,7 +161,7 @@
             <span class="card-icon icon-amber">⏰</span>
             <h2 class="card-title">定时提醒设置</h2>
           </header>
-          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的发送开关与提前天数（北京时间）。系统由 Vercel Cron 每日 20:00（北京时间）自动触发发送，发送时间由部署配置固定，不可在页面修改。也可点击下方按钮立即手动触发一次。</p>
+          <p class="text-muted text-sm mb-12">配置任务到期提醒邮件的发送开关与提前天数（北京时间）。系统由 Vercel Cron 每日 18:00（北京时间）自动触发发送，发送时间由部署配置固定，不可在页面修改。也可点击下方按钮立即手动触发一次。</p>
           <div class="form-group">
             <label>启用定时提醒</label>
             <select v-model="reminder.enabled" class="form-select">
@@ -171,7 +171,7 @@
           </div>
           <div class="form-group">
             <label>每日执行时间（北京时间）</label>
-            <p class="text-muted">每日 20:00 自动发送（由 Vercel Cron 固定触发，页面不可修改）</p>
+            <p class="text-muted">每日 18:00 自动发送（由 Vercel Cron 固定触发，页面不可修改）</p>
           </div>
           <div class="form-group">
             <label>提前提醒天数（任务截止前 N 天发送）</label>
