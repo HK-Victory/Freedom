@@ -4,7 +4,7 @@
  * 目标：在完全离线、可复现的环境下，认真验证 Vercel Cron 触发的完整逻辑链：
  *   1) 鉴权：Vercel 明文 Bearer <CRON_SECRET>（以及保留的 ?secret= 手动入口）
  *   2) 提醒总开关门：getReminderSettings().enabled === false → 直接跳过，不发送
- *   3) 发送时间由 Vercel Cron 固定触发（vercel.json 0 12 * * * = 北京 20:00），端点到达即发送，不再受页面 hour 字段门禁影响
+ *   3) 发送时间由 Vercel Cron 固定触发（vercel.json 0 10 * * * = 北京 18:00），端点到达即发送，不再受页面 hour 字段门禁影响
  *   4) 邮件总开关门：email_config.enabled === 0 → 跳过，不发送
  *   5) 实际发送：仅「临期(今日/落在提前天数) + 逾期」被选中，已完成/远期/无截止日任务被排除
  *   6) 当日去重：同一 UTC 日二次触发（force=false）应 skipped 全部、sent=0
@@ -207,7 +207,7 @@ const dueTasks = () => [
   const vc = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../vercel.json'), 'utf8'));
   check('vercel.json 含 crons 且非空', Array.isArray(vc.crons) && vc.crons.length >= 1, vc.crons);
   check('cron path = /api/cron/reminders', vc.crons[0].path === '/api/cron/reminders', vc.crons[0]);
-  check('cron schedule = 0 12 * * *（每日 12:00 UTC = 20:00 北京，符合 Hobby 每日一次限制）', vc.crons[0].schedule === '0 12 * * *', vc.crons[0].schedule);
+  check('cron schedule = 0 10 * * *（每日 10:00 UTC = 18:00 北京，符合 Hobby 每日一次限制）', vc.crons[0].schedule === '0 10 * * *', vc.crons[0].schedule);
 
   server.close();
   console.log(`\n结果：通过 ${pass} 项，失败 ${fail} 项`);

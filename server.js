@@ -362,7 +362,7 @@ app.put('/api/email/recipients/:id', requireAuth, asyncHandler(async (req, res) 
   res.json({ success: true });
 }));
 
-// ============ 提醒设置 API（提前提醒天数可配置；发送时间由 vercel.json 固定为北京 20:00）============
+// ============ 提醒设置 API（提前提醒天数可配置；发送时间由 vercel.json 固定为北京 18:00）============
 
 app.get('/api/settings/reminder', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   res.json(await getReminderSettings());
@@ -474,9 +474,9 @@ app.get('/api/reminders', requireAuth, asyncHandler(async (req, res) => {
   res.json(reminders);
 }));
 
-// ============ 定时提醒（由 Vercel Cron 每日 20:00 北京时间调用）============
+// ============ 定时提醒（由 Vercel Cron 每日 18:00 北京时间调用）============
 // 通过 CRON_SECRET 环境变量鉴权，避免被随意调用。
-// 发送时间由 vercel.json 的 crons.schedule（0 12 * * * = 北京 20:00）固定，页面不可改；
+// 发送时间由 vercel.json 的 crons.schedule（0 10 * * * = 北京 18:00）固定，页面不可改；
 // 端点被调用即代表到达发送时刻，不再做「页面配置小时 == 当前北京小时」门禁——
 // 旧门禁在 Vercel Hobby 每日仅一个静态 cron 下是陷阱：改页面时间反而导致提醒永久跳过。
 
@@ -521,7 +521,7 @@ app.get('/api/cron/reminders', asyncHandler(async (req, res) => {
     return res.json({ skipped: true, reason: '提醒未启用（请在「邮件配置-定时提醒设置」中开启）' });
   }
   try {
-    // 仅由 Vercel Cron 每日 20:00（北京）触发一次；到达即代表发送时刻，
+    // 仅由 Vercel Cron 每日 18:00（北京）触发一次；到达即代表发送时刻，
     // 不再做「页面配置小时 == 当前小时」门禁，避免改页面时间后提醒被静默跳过。
     // 定时任务与单次触发共用「临期+逾期」筛选规则；此处尊重当日去重。
     // 手动测试/重发可用 ?force=1（同样受 CRON_SECRET 保护），绕过去重、确保点击即重发。
